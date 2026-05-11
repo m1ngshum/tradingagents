@@ -106,10 +106,15 @@ def main() -> int:
         ).isoformat()
 
     # Over-fetch when filtering client-side so we still end up with --limit
-    # markets after low-liquidity ones are dropped.
+    # markets after low-liquidity ones are dropped.  When --days-until-close
+    # sorts by end date, high-liquidity markets are spread across the entire
+    # window (not clustered at the near end), so we need a much larger fetch.
     fetch_limit = args.limit
     if args.min_liquidity > 0:
-        fetch_limit = max(args.limit * 5, 25)
+        if args.days_until_close is not None:
+            fetch_limit = max(args.limit * 20, 600)
+        else:
+            fetch_limit = max(args.limit * 5, 25)
     market_kwargs["limit"] = fetch_limit
 
     try:
