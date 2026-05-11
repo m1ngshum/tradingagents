@@ -189,9 +189,12 @@ Required sequence before Phase B:
 3. ~~50-market backtest~~ **DONE — class-imbalanced, see finding #8**
 4. ~~Quote-prediction fix~~ **DONE (commit 0fc6741)**
 5. ~~Kelly criterion sizing~~ **DONE (`tradingagents/exchange/binary_risk.py`)**
-6. **NEXT: Electoral base-rate calibration fix** — add a third trader prompt clause
-   for electoral markets ("insurgent wins" base rate is historically low).
-   Estimated effort: ~15 min. Then run 20+ more paper positions on non-electoral
-   markets to measure live accuracy before re-attempting electoral markets.
+6. ~~**Electoral base-rate calibration fix**~~ **DONE 2026-05-11.** Added
+   ELECTORAL MARKETS clause to trader prompt. Spot-check on the 3 Welsh markets
+   that lost -$300: Reform UK → HOLD, Welsh Conservatives → BUY_NO ✓, Welsh Greens
+   → BUY_NO (conf 0.97) ✓. All correct — none called BUY_YES.
+7. **NEXT: Run 30+ live paper positions on non-electoral markets** to measure
+   production accuracy. Use `run_polymarket.py` on current open sports/crypto/tech
+   markets before re-attempting electoral markets.
 7. **Only after clearing 55%+ on 30+ live markets:** evaluate Phase B economics
    with the binary risk model. Current infrastructure is ready; edge is not.

@@ -30,13 +30,12 @@ for real money. Need 55%+ on 30+ live markets before enabling the Kelly executor
 
 ### What's next
 
-1. **Electoral base-rate calibration fix** (highest priority, ~15 min).
-   Add a third trader prompt clause for electoral markets: insurgent/challenger
-   parties rarely win first-past-the-post elections outright regardless of
-   narrative momentum. The BASE-RATE SKEPTICISM clause didn't catch this because
-   it targets geopolitical outcomes, not domestic elections.
+1. ~~**Electoral base-rate calibration fix.**~~ **DONE 2026-05-11.**
+   ELECTORAL MARKETS clause added to trader prompt. Spot-check: Reform UK → HOLD,
+   Welsh Conservatives → BUY_NO ✓, Welsh Greens → BUY_NO ✓. All 3 markets that
+   lost -$300 now correctly avoided. No regression on 10-market cross-domain set.
 
-2. **30+ live paper positions on non-electoral markets** to measure production
+2. **Run 30+ live paper positions on non-electoral markets** to measure production
    accuracy before attempting electoral markets again. Use `run_polymarket.py`
    on current open markets — sports, crypto, tech releases.
 
