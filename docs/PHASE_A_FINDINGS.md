@@ -2,11 +2,17 @@
 
 ## TL;DR
 
-After running the research engine against 25 resolved markets across two
-domains (crypto-FDV launches + cross-domain politics/sports/tech) with two
-models (gpt-4o-mini, claude-sonnet-4-6), the honest read is:
+After running the research engine across backtests and one live post-cutoff
+paper-trading test (Welsh/UK elections, 2026-05-11), the honest read is:
 
-**The pipeline produces calibrated outputs. It does not yet have proven edge.**
+**The pipeline is not ready for real money. Drama-bias persists on live data.**
+
+The 88.9% backtest accuracy was inflated by look-ahead contamination. On truly
+post-cutoff markets (Welsh/UK elections, resolving after the LLM training cutoff),
+the model scored 28.6% win rate with -54.6% ROI. The drama-bias fix reduced the
+problem in backtests but not in production. Electoral "insurgent wins" markets
+(e.g. Reform UK) are a specific failure mode that needs a targeted calibration fix
+before any further paper positions, let alone real money.
 
 ## Numbers
 
@@ -21,6 +27,7 @@ models (gpt-4o-mini, claude-sonnet-4-6), the honest read is:
 | **Look-ahead-free deep (30)** | **Sonnet** | **30** | **100% (24/24 + 6 HOLDs)** | **6** | **closed before 2026-03-01; class-imbalanced (28 NO / 2 YES); Sonnet held both YES markets (4.6% random chance); no BUY_YES calls in sample** |
 | Cross-domain (10) + quote-fix v2 | Sonnet | 10 | 60% (6/10 + 0 HOLDs) | 0 | 2 regressions are Exa news stochasticity (different articles = different drama-bias trigger); Trump-Allah failure traced to look-ahead market price data in Exa results, not prompt failure; see finding #7 |
 | **50-market balanced attempt (pre-2026-03-01)** | **Sonnet** | **50** | **85.4% (35/41 + 9 HOLDs)** | **9** | **44 NO / 6 YES (88% NO rate); always-NO bot scores 87.8% on same set — model is 2pp below; real signal is 2 correct BUY_YES (Gen.G LCK, Red Wings O/U) + 1 smart HOLD (XRP 5-min binary); see finding #8** |
+| **🚨 LIVE post-cutoff (Welsh/UK elections)** | **Sonnet** | **14 resolved** | **28.6% (4/14)** | **0** | **Zero look-ahead possible. Bot went BUY_YES on Reform UK winning seats ×4 (all NO). Drama-bias persists in production. -54.6% ROI. See finding #9.** |
 
 ## Key findings
 
@@ -55,10 +62,10 @@ but small, 1 saved bet out of 10.
 Need 30-50+ markets across diverse domains, ideally with `--end-date-max`
 pushed back further to fully eliminate look-ahead bias.
 
-### 5. Live testing on post-cutoff markets is the real signal
-The 18 paper positions on Welsh/UK local elections (resolving over the
-next 24-72h) cannot be recall, those events occur AFTER training.
-That is the clean test.
+### 5. Live testing on post-cutoff markets is the real signal — result is in
+The 18 paper positions on Welsh/UK local elections resolved 2026-05-11.
+Result: 4/14 = **28.6% win rate, -54.6% ROI**. See finding #9 for full diagnosis.
+The clean test confirmed the drama-bias fix is insufficient for live data.
 
 ### 8. 50-market run: still class-imbalanced; YES discrimination exists but sample is too small
 
@@ -169,17 +176,22 @@ favors incumbents.
 
 ## Implications for Phase B
 
-The case for real-money execution is **MORE PLAUSIBLE but not yet justified**:
-- 88.9% accuracy on 10 markets + 100% on 30 (mostly NO-skewed) shows
-  calibration discipline; absolute edge claims still need a balanced sample
-- 2% Polymarket fees + slippage erode marginal edge
-- Geopolitical drama bias addressed; quote-prediction bias remains (Trump-Allah)
+**Phase B is NOT ready. The live test result (finding #9) changes the picture.**
 
-Recommended sequence before any real-money move:
-1. Score the live Welsh/UK positions when they resolve (post-cutoff truth)
-2. ~~Tighten bull/bear prompts to push back on drama bias~~ DONE (commit b1ee146)
-3. Run a 50-market backtest with `--end-date-max 2026-03-01` for a
-   wider, less-recallable sample
-4. Investigate the quote-prediction failure mode (Trump-Allah) if it
-   recurs at scale
-5. Only then evaluate Phase B economics with the binary risk model
+The 28.6% win rate on post-cutoff markets proves the model is below the 50% random
+baseline on live data. Real-money execution at this accuracy loses to a coin flip
+before fees. The Kelly sizing infrastructure (Phase B) is complete but should not
+be connected to real capital until accuracy clears 55%+ on at least 30 live markets.
+
+Required sequence before Phase B:
+1. ~~Score the live Welsh/UK positions~~ **DONE — 28.6% win rate, see finding #9**
+2. ~~Drama-bias prompt fix~~ **DONE (commit b1ee146)**
+3. ~~50-market backtest~~ **DONE — class-imbalanced, see finding #8**
+4. ~~Quote-prediction fix~~ **DONE (commit 0fc6741)**
+5. ~~Kelly criterion sizing~~ **DONE (`tradingagents/exchange/binary_risk.py`)**
+6. **NEXT: Electoral base-rate calibration fix** — add a third trader prompt clause
+   for electoral markets ("insurgent wins" base rate is historically low).
+   Estimated effort: ~15 min. Then run 20+ more paper positions on non-electoral
+   markets to measure live accuracy before re-attempting electoral markets.
+7. **Only after clearing 55%+ on 30+ live markets:** evaluate Phase B economics
+   with the binary risk model. Current infrastructure is ready; edge is not.

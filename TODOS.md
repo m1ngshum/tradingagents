@@ -1,37 +1,47 @@
 # TradingAgents Fork — TODOS
 
-## Next steps (recommended order)
+## Current status (2026-05-11)
 
-The pipeline is calibrated, secure (prompt-injection + rate-limited),
-and clean (single io_utils helper). Three open work items, in priority
-order:
+**Phase B is blocked. Live test showed 28.6% win rate — below random baseline.**
 
-1. ~~**Score the live Welsh/UK paper positions when they resolve.**~~
-   **DONE 2026-05-11.** Result: 4/14 = 28.6% win rate, -$928.80 realized P&L (-54.6% ROI).
-   Drama-bias persists on live post-cutoff data — 88.9% backtest accuracy was
-   inflated by look-ahead. See PHASE_A_FINDINGS #9.
+The Welsh/UK live paper-trading test (finding #9 in PHASE_A_FINDINGS.md) revealed
+that drama-bias persists on truly post-cutoff data. All Phase A and Phase B
+infrastructure is complete, but the model's live accuracy (28.6%) is too low
+for real money. Need 55%+ on 30+ live markets before enabling the Kelly executor.
 
-2. ~~**Quote-prediction prompt fix** (Phase A polish).~~
-   **DONE 2026-05-10** (commit pending). QUOTE-PREDICTION MARKETS clause
-   added to trader prompt. A/B re-test on same 10 markets: Trump-Biden
-   ("again") now correctly BUY_YES. Trump-Allah still BUY_NO — traced to
-   look-ahead market price data in Exa news (a backtest artifact, not a
-   live-trading failure). See PHASE_A_FINDINGS #7.
+### What's done
 
-3. ~~**50-market balanced backtest** (Phase A statistical claim).~~
-   **DONE 2026-05-10** but filter produced wrong domain mix. 85.4% accuracy
-   (35/41, 9 HOLDs) on 44 NO / 6 YES sample — always-NO bot scores 87.8%,
-   so the headline number doesn't prove edge. Real signal: Gen.G LCK Cup
-   and Red Wings O/U correctly called BUY_YES. Next step: re-run with a
-   domain filter that excludes award nominations and targets sports finals +
-   O/U lines for a near-50% YES rate. See PHASE_A_FINDINGS #8.
+1. ~~**Score the live Welsh/UK paper positions.**~~
+   **DONE 2026-05-11.** 4/14 resolved = 28.6% win rate, -$928.80 P&L (-54.6% ROI).
+   Drama-bias persists in production. See PHASE_A_FINDINGS #9.
 
-4. ~~**Phase B Kelly criterion sizing**~~ **DONE 2026-05-11.**
-   `tradingagents/exchange/binary_risk.py` — `kelly_fraction()` + `size_order()`
-   with half-Kelly (0.5x), 20% cap, 55% min-confidence gate. Wired into
-   `live_executor.place_order()` (renamed `budget_usd` → `capital_usd`).
-   11 tests pass. Remaining blockers before real execution:
-   py-clob-client install + wallet infra + regulatory review (US blocked).
+2. ~~**Quote-prediction prompt fix.**~~
+   **DONE 2026-05-10.** QUOTE-PREDICTION MARKETS clause added. Trump-Biden fixed.
+   Trump-Allah failure traced to look-ahead backtest artifact. See #7.
+
+3. ~~**50-market balanced backtest.**~~
+   **DONE 2026-05-10.** 85.4% accuracy but 88% NO-skewed sample — always-NO bot
+   beats it by 2pp. Real signal: 2 correct BUY_YES calls. See #8.
+
+4. ~~**Phase B Kelly criterion sizing.**~~
+   **DONE 2026-05-11.** `tradingagents/exchange/binary_risk.py` — half-Kelly,
+   20% cap, 55% confidence gate. Wired into `live_executor.place_order()`.
+   18 tests pass. Remaining blockers: py-clob-client + wallet + regulatory.
+
+### What's next
+
+1. **Electoral base-rate calibration fix** (highest priority, ~15 min).
+   Add a third trader prompt clause for electoral markets: insurgent/challenger
+   parties rarely win first-past-the-post elections outright regardless of
+   narrative momentum. The BASE-RATE SKEPTICISM clause didn't catch this because
+   it targets geopolitical outcomes, not domestic elections.
+
+2. **30+ live paper positions on non-electoral markets** to measure production
+   accuracy before attempting electoral markets again. Use `run_polymarket.py`
+   on current open markets — sports, crypto, tech releases.
+
+3. **Phase B real execution** — only after clearing 55%+ on 30+ live markets.
+   All infrastructure is ready. Edge is not yet demonstrated.
 
 ---
 
@@ -103,17 +113,14 @@ trading failure). See PHASE_A_FINDINGS #7 for full diagnosis.
 
 ## Polymarket Phase B
 
-### TODO: Binary risk model (Kelly criterion sizing)
-**What:** New position-sizing module for Polymarket binary contracts, replacing
-the `stop_loss_pct`-based formula in `trade-poc/src/risk/engine.ts`.
-**Why:** YES/NO contracts resolve at $1 or $0; there is no stop-loss to set.
-The existing `RISK_PER_TRADE_PCT / stop_loss_pct` formula produces nonsense.
-**Context:** Kelly criterion: `f* = (b*p - q) / b`
-- `p` = estimated YES probability (from `confidence` in `PolymarketDecision`)
-- `q` = 1 - p
-- `b` = (1 / yes_price_at_analysis) - 1
-Cap at `MAX_POSITION_PCT`. Confidence threshold still applies.
-Start: `trade-poc/src/risk/binary.ts` or as Python in `tradingagents/exchange/`.
-**Effort:** ~0.5 day (human) / ~15 min (CC)
-**Depends on:** Phase A `PolymarketDecision` schema (already exists), regulatory
-review for real-money execution, py-clob-client wallet integration.
+### DONE: Binary risk model (Kelly criterion sizing)
+**Shipped 2026-05-11** (`tradingagents/exchange/binary_risk.py`).
+Half-Kelly multiplier (0.5×), 20% max position per trade, 55% min-confidence
+gate. Wired into `live_executor.place_order()`. 18 unit tests pass.
+
+**Remaining execution blockers (not code problems):**
+- `py-clob-client` not installed (not in pyproject.toml by default)
+- Wallet key management and USDC balance check
+- Polymarket account creation flow
+- Regulatory review — US persons currently blocked from Polymarket
+- **Live accuracy gate: model must clear 55%+ on 30+ live markets first**
