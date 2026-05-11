@@ -6,12 +6,10 @@ The pipeline is calibrated, secure (prompt-injection + rate-limited),
 and clean (single io_utils helper). Three open work items, in priority
 order:
 
-1. **Score the live Welsh/UK paper positions when they resolve.**
-   Zero new code. Run `python scripts/score_fills.py --verbose` once
-   the markets close in the next 24-72h and append the result to
-   `docs/PHASE_A_FINDINGS.md`. This is the only fully look-ahead-free
-   signal we can get without writing more code, since those events
-   resolve AFTER the LLM training cutoff.
+1. ~~**Score the live Welsh/UK paper positions when they resolve.**~~
+   **DONE 2026-05-11.** Result: 4/14 = 28.6% win rate, -$928.80 realized P&L (-54.6% ROI).
+   Drama-bias persists on live post-cutoff data — 88.9% backtest accuracy was
+   inflated by look-ahead. See PHASE_A_FINDINGS #9.
 
 2. ~~**Quote-prediction prompt fix** (Phase A polish).~~
    **DONE 2026-05-10** (commit pending). QUOTE-PREDICTION MARKETS clause

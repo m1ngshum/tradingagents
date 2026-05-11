@@ -135,6 +135,38 @@ The gap: zero BUY_YES calls in the entire sample. The drama-fix run
 sample, but the 30-market sample didn't include enough YES-favoring
 markets to test it independently.
 
+### 9. Live look-ahead-free test: Welsh/UK elections — drama-bias persists in production
+
+**The most important Phase A finding.** 18 paper positions on 2026 Welsh Senedd,
+Scottish Parliament, and UK council seat elections. These events resolve AFTER the
+LLM training cutoff — zero look-ahead contamination possible.
+
+**Result: 4/14 resolved = 28.6% win rate. Realized P&L: -$928.80 on $1,400 invested (-54.6% ROI).**
+
+| Status | Direction | Question | P&L |
+|--------|-----------|----------|-----|
+| WIN | BUY_YES | Russia-Ukraine Ceasefire before GTA VI? | +$75 |
+| WIN | BUY_NO | Welsh Conservatives win most seats | -$2 |
+| WIN | BUY_NO | Reform UK wins most Scottish Parliament seats | -$2 |
+| WIN | BUY_NO | Conservative Party wins most council seats | -$2 |
+| LOSS×4 | BUY_YES | Reform UK wins most Welsh/Scottish seats | -$400 |
+| LOSS×4 | BUY_YES | Greens/LibDems/Conservatives win seats | -$400 |
+
+**Why it failed:** The bot went BUY_YES on 4 separate "Reform UK wins the most seats"
+markets. Reform UK was a large insurgent political story — exactly the kind of dramatic
+narrative the bull researcher over-weights. The drama-bias BASE-RATE SKEPTICISM clause
+caught this in the cross-domain A/B backtest because that backtest used known-resolved
+markets with post-resolution news. On live pre-resolution data, the bull researcher
+found compelling arguments and the trader didn't resist strongly enough.
+
+**Implication:** The 88.9% drama-fix backtest result was inflated by look-ahead bias.
+On truly post-cutoff data, the model shows 28.6% — significantly below the 50% random
+baseline. The drama-bias fix is necessary but not sufficient. Stronger calibration is
+needed for electoral "insurgent wins" markets where the historical base rate strongly
+favors incumbents.
+
+---
+
 ## Implications for Phase B
 
 The case for real-money execution is **MORE PLAUSIBLE but not yet justified**:
