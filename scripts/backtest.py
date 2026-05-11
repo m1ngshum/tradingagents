@@ -24,7 +24,6 @@ Writes one JSONL row per market to:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -44,16 +43,16 @@ from tradingagents.dataflows.polymarket_data import (
     _normalise_market,
 )
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.exchange.io_utils import POLYMARKET_OUTPUT_DIR, append_jsonl
 from tradingagents.exchange.scoring import MarketOutcome, classify_outcome
 from tradingagents.graph.trading_graph import TradingAgentsGraph
-
-OUTPUT_DIR = Path.home() / ".tradingagents" / "polymarket"
 
 
 def _fetch_resolved_markets(
     limit: int,
     min_volume: float = 10000.0,
     end_date_max: str | None = None,
+    market_ids: list[str] | None = None,
 ) -> list[dict]:
     """Pull resolved (closed) markets from gamma for backtesting.
 
@@ -69,7 +68,14 @@ def _fetch_resolved_markets(
     closed BEFORE that date. Useful for forcing domain diversity: the
     most-recent closed list is currently dominated by crypto FDV launches,
     so going back a few weeks surfaces politics/sports/tech markets.
+
+    If `market_ids` is set, fetches only those specific market IDs in order
+    (ignores `limit`, `min_volume`, and `end_date_max`). Useful for
+    reproducible A/B re-tests against the same market set.
     """
+    if market_ids:
+        return _fetch_markets_by_id(market_ids)
+
     params = {
         "closed": "true",
         "limit": str(max(limit * 8, 100)),  # over-fetch for filtering
@@ -107,6 +113,36 @@ def _fetch_resolved_markets(
     return out
 
 
+def _fetch_markets_by_id(market_ids: list[str]) -> list[dict]:
+    """Fetch specific markets by ID for reproducible A/B re-tests."""
+    out: list[dict] = []
+    for mid in market_ids:
+        try:
+            resp = _http_get_with_retry(
+                f"{GAMMA_BASE}/markets/{mid}", params={}, timeout=DEFAULT_TIMEOUT
+            )
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            print(f"  WARNING: market {mid} fetch failed ({e}), skipping", file=sys.stderr)
+            continue
+        try:
+            body = resp.json()
+        except Exception as e:  # noqa: BLE001
+            print(f"  WARNING: market {mid} returned non-JSON body ({e}), skipping", file=sys.stderr)
+            continue
+        m = _normalise_market(body)
+        if m is None:
+            print(f"  WARNING: market {mid} could not be normalised, skipping", file=sys.stderr)
+            continue
+        prices = [m["yes_price"], 1.0 - m["yes_price"]]
+        outcome, _ = classify_outcome(closed=True, outcome_prices=prices)
+        if outcome not in (MarketOutcome.YES_WINS, MarketOutcome.NO_WINS):
+            print(f"  WARNING: market {mid} has no scoreable outcome ({outcome}), skipping", file=sys.stderr)
+            continue
+        m["_actual_outcome"] = outcome
+        out.append(m)
+    return out
+
+
 def _model_slug(model: str) -> str:
     return model.replace("/", "-").replace(":", "-")
 
@@ -139,20 +175,35 @@ def main() -> int:
             "weeks surfaces politics/sports/tech for cross-domain testing."
         ),
     )
+    parser.add_argument(
+        "--market-ids",
+        nargs="+",
+        metavar="ID",
+        default=None,
+        help=(
+            "Fetch only these specific market IDs (space-separated). "
+            "Useful for reproducible A/B re-tests against the same market "
+            "set. Ignores --limit, --min-volume, and --end-date-max."
+        ),
+    )
     args = parser.parse_args()
 
     if not all(os.environ.get(k) for k in ["EXA_API_KEY", "OPENROUTER_API_KEY"]):
         print("ERROR: EXA_API_KEY and OPENROUTER_API_KEY must be set", file=sys.stderr)
         return 2
 
-    horizon = f" (closed before {args.end_date_max})" if args.end_date_max else ""
-    print(
-        f"Fetching {args.limit} resolved markets (>= ${args.min_volume:,.0f} "
-        f"cumulative volume){horizon}..."
-    )
+    if args.market_ids:
+        print(f"Fetching {len(args.market_ids)} specific markets by ID...")
+    else:
+        horizon = f" (closed before {args.end_date_max})" if args.end_date_max else ""
+        print(
+            f"Fetching {args.limit} resolved markets (>= ${args.min_volume:,.0f} "
+            f"cumulative volume){horizon}..."
+        )
     try:
         markets = _fetch_resolved_markets(
-            args.limit, args.min_volume, end_date_max=args.end_date_max
+            args.limit, args.min_volume, end_date_max=args.end_date_max,
+            market_ids=args.market_ids,
         )
     except GammaAPIError as e:
         print(f"ERROR: gamma fetch failed: {e}", file=sys.stderr)
@@ -176,8 +227,7 @@ def main() -> int:
     ta = TradingAgentsGraph(config=config)
 
     now = datetime.now(timezone.utc)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = OUTPUT_DIR / f"backtest-{now.strftime('%Y-%m-%d')}-{_model_slug(args.model)}.jsonl"
+    log_path = POLYMARKET_OUTPUT_DIR / f"backtest-{now.strftime('%Y-%m-%d')}-{_model_slug(args.model)}.jsonl"
 
     correct = 0
     total_scored = 0
@@ -236,8 +286,7 @@ def main() -> int:
             "is_hold": is_hold,
             "rationale": decision.rationale,
         }
-        with log_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, separators=(",", ":")) + "\n")
+        append_jsonl(log_path, row)
 
     print()
     print("=" * 70)

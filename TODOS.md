@@ -1,5 +1,42 @@
 # TradingAgents Fork — TODOS
 
+## Next steps (recommended order)
+
+The pipeline is calibrated, secure (prompt-injection + rate-limited),
+and clean (single io_utils helper). Three open work items, in priority
+order:
+
+1. **Score the live Welsh/UK paper positions when they resolve.**
+   Zero new code. Run `python scripts/score_fills.py --verbose` once
+   the markets close in the next 24-72h and append the result to
+   `docs/PHASE_A_FINDINGS.md`. This is the only fully look-ahead-free
+   signal we can get without writing more code, since those events
+   resolve AFTER the LLM training cutoff.
+
+2. ~~**Quote-prediction prompt fix** (Phase A polish).~~
+   **DONE 2026-05-10** (commit pending). QUOTE-PREDICTION MARKETS clause
+   added to trader prompt. A/B re-test on same 10 markets: Trump-Biden
+   ("again") now correctly BUY_YES. Trump-Allah still BUY_NO — traced to
+   look-ahead market price data in Exa news (a backtest artifact, not a
+   live-trading failure). See PHASE_A_FINDINGS #7.
+
+3. ~~**50-market balanced backtest** (Phase A statistical claim).~~
+   **DONE 2026-05-10** but filter produced wrong domain mix. 85.4% accuracy
+   (35/41, 9 HOLDs) on 44 NO / 6 YES sample — always-NO bot scores 87.8%,
+   so the headline number doesn't prove edge. Real signal: Gen.G LCK Cup
+   and Red Wings O/U correctly called BUY_YES. Next step: re-run with a
+   domain filter that excludes award nominations and targets sports finals +
+   O/U lines for a near-50% YES rate. See PHASE_A_FINDINGS #8.
+
+4. ~~**Phase B Kelly criterion sizing**~~ **DONE 2026-05-11.**
+   `tradingagents/exchange/binary_risk.py` — `kelly_fraction()` + `size_order()`
+   with half-Kelly (0.5x), 20% cap, 55% min-confidence gate. Wired into
+   `live_executor.place_order()` (renamed `budget_usd` → `capital_usd`).
+   11 tests pass. Remaining blockers before real execution:
+   py-clob-client install + wallet infra + regulatory review (US blocked).
+
+---
+
 ## Polymarket Phase A
 
 ### DONE: Polymarket backtesting harness
@@ -15,16 +52,30 @@ so guaranteed-loser trades log "NEGATIVE_EV_BLOCKED" and don't persist.
 
 ---
 
-### TODO: Gamma API retry/backoff
-**What:** Add `tenacity` retry + exponential backoff to all Gamma REST calls
-in `tradingagents/dataflows/polymarket_data.py`.
-**Why:** Gamma rate limits are undocumented. Without retry logic, a 429 produces
-a silent empty result or an exception dump with no user-visible message.
-**Context:** `@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))`
-on transient failures only (network errors, 429, 5xx). Don't retry 4xx
-client errors.
-**Effort:** 15 min
-**Depends on:** nothing
+### DONE: Gamma API retry/backoff
+Shipped 2026-05-08. `_http_get_with_retry()` in
+`tradingagents/dataflows/polymarket_data.py` wraps Gamma REST calls with
+tenacity retry on transient failures (network errors, 429, 5xx). 4xx
+client errors are not retried.
+
+---
+
+### DONE: Prompt-injection sanitiser + daily call rate limiter
+Shipped 2026-05-08 (commit `a1e8748`). `tradingagents/agents/utils/sanitize.py`
+neutralises 7 classes of prompt-injection patterns in untrusted Exa news
+text before it reaches the bull/bear/trader prompts.
+`tradingagents/exchange/rate_limiter.py` caps daily LLM call volume
+(default 100, override via `POLYMARKET_DAILY_CALL_LIMIT`) to bound
+runaway-spend risk. State persisted at `~/.tradingagents/polymarket/rate_limit.json`.
+
+---
+
+### DONE: io_utils migration cleanup
+Shipped 2026-05-08 (commit `b750ac0`, PR #1). All three Polymarket
+scripts (`run_polymarket.py`, `score_fills.py`, `backtest.py`) now use
+`tradingagents.exchange.io_utils.POLYMARKET_OUTPUT_DIR` and `append_jsonl`
+instead of local copies. Net -15 lines, single source of truth for the
+output dir and JSONL format.
 
 ---
 
@@ -42,20 +93,13 @@ the calibration check.
 
 ---
 
-### TODO: Investigate quote-prediction failure mode
-**What:** Sonnet (and mini) wrongly predicted "Trump praise Allah by
-Apr 15" as NO when actual was YES. Quote-prediction markets are a
-distinct failure mode from drama-bias.
-**Why:** The bot has no information advantage on whether a person
-will say a specific word in a specific upcoming interview. It should
-either default to base-rate (prior frequency Trump used the word) or
-HOLD.
-**Context:** Add a clause to the trader prompt: "for quote-prediction
-markets ('will X say Y'), default to the historical frequency the
-person has used the word in similar contexts. If you have no base
-rate, prefer HOLD."
-**Effort:** 15 min + same A/B 10-market test
-**Depends on:** nothing
+### DONE: Quote-prediction failure mode investigation
+**Shipped 2026-05-10.** QUOTE-PREDICTION MARKETS clause (v2) added to
+trader prompt in `propagate_market()`. Handles "again" keyword as
+base-rate evidence toward YES, separates frequency signal from drama signal.
+Trump-Biden correctly called BUY_YES. Trump-Allah failure traced to
+look-ahead market price data in Exa news (backtest artifact, not a live
+trading failure). See PHASE_A_FINDINGS #7 for full diagnosis.
 
 ---
 
