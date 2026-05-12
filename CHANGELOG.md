@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## v0.4.0.0 — 2026-05-12
+
+### Added
+- Phase C: Alpaca paper stock trading via `propagate_stock()` + `AlpacaExecutor`
+- `scripts/run_stocks.py` — analyse 10-ticker watchlist, paper-trade decisions
+- `scripts/score_stocks.py` — mark-to-market open stock positions
+- `StockDecision` / `StockDirection` models in `tradingagents/agents/schemas.py`
+- Half-Kelly sizing capped at 10% per position, 55% confidence gate
+- `alpaca-py>=0.8` dependency
+
 ## [0.3.0] — 2026-05-11
 
 ### Added

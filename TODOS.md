@@ -42,6 +42,12 @@ for real money. Need 55%+ on 30+ live markets before enabling the Kelly executor
 3. **Phase B real execution** — only after clearing 55%+ on 30+ live markets.
    All infrastructure is ready. Edge is not yet demonstrated.
 
+4. ~~**Phase C: Alpaca stock trading.**~~ **DONE 2026-05-12.**
+   `propagate_stock()` + `AlpacaExecutor` + `run_stocks.py` + `score_stocks.py`.
+   10-ticker default watchlist (AAPL/MSFT/NVDA/GOOGL/AMZN/META/TSLA/JPM/XOM/UNH),
+   half-Kelly sizing, 10% max per position, 55% confidence gate.
+   Needs Alpaca API keys to activate (see .env.example).
+
 ---
 
 ## Polymarket Phase A
