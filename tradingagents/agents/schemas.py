@@ -297,7 +297,7 @@ class StockDecision(BaseModel):
     produces exactly this shape.
     """
 
-    ticker: str = Field(description="Upper-case ticker symbol, e.g. 'AAPL'.")
+    ticker: str = Field(min_length=1, description="Upper-case ticker symbol, e.g. 'AAPL'.")
     direction: StockDirection = Field(
         description="LONG (buy), SHORT (sell/short), or HOLD."
     )
@@ -315,6 +315,7 @@ class StockDecision(BaseModel):
     )
     horizon_days: int = Field(
         default=5,
+        ge=1,
         description="Holding period in trading days (default: 5 = one week).",
     )
     cycle_ts: int = Field(
