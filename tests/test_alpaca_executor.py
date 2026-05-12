@@ -129,3 +129,17 @@ def test_zero_sizing_returns_skipped(monkeypatch):
         with patch("tradingagents.exchange.alpaca_executor.size_stock_order", return_value={"usd": 0.0, "fraction": 0.0, "reason": "negative Kelly"}):
             result = executor.place_order(_long_decision(), capital_usd=10000)
     assert result["status"] == "SKIPPED"
+
+
+def test_order_error_returns_error_status(monkeypatch):
+    monkeypatch.setenv("ALPACA_API_KEY", "fake_key")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "fake_secret")
+    monkeypatch.setenv("ALPACA_PAPER", "true")
+    with patch("tradingagents.exchange.alpaca_executor.TradingClient") as mock_tc:
+        mock_client = MagicMock()
+        mock_client.submit_order.side_effect = RuntimeError("connection timeout")
+        mock_tc.return_value = mock_client
+        executor = AlpacaExecutor()
+        result = executor.place_order(_long_decision(), capital_usd=10000)
+    assert result["status"] == "ERROR"
+    assert "connection timeout" in result["reason"]
