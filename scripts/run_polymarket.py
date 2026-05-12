@@ -34,6 +34,10 @@ from tradingagents.dataflows.polymarket_data import (
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.exchange.io_utils import POLYMARKET_OUTPUT_DIR, append_jsonl
 from tradingagents.exchange.paper_fill import is_economic_when_correct, simulate_fill
+from tradingagents.exchange.polymarket_executor import (
+    PolymarketExecutionDisabled,
+    PolymarketExecutor,
+)
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 logger = logging.getLogger(__name__)
@@ -86,6 +90,21 @@ def main() -> int:
         ),
     )
     parser.add_argument("--quiet", action="store_true", help="Print only the JSONL path")
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help=(
+            "Submit real orders via Polymarket CLOB instead of paper-filling. "
+            "Requires POLYMARKET_PRIVATE_KEY, POLYMARKET_KEY, POLYMARKET_SECRET, "
+            "POLYMARKET_PASSPHRASE, POLYMARKET_FUNDER in environment."
+        ),
+    )
+    parser.add_argument(
+        "--capital",
+        type=float,
+        default=1000.0,
+        help="Total capital in USDC for Kelly sizing when --live is set (default: 1000.0)",
+    )
     args = parser.parse_args()
 
     if not os.environ.get("EXA_API_KEY"):
@@ -94,6 +113,15 @@ def main() -> int:
     if not os.environ.get("OPENROUTER_API_KEY"):
         print("ERROR: OPENROUTER_API_KEY not set in environment or .env", file=sys.stderr)
         return 2
+
+    live_executor: PolymarketExecutor | None = None
+    if args.live:
+        try:
+            live_executor = PolymarketExecutor()
+            print(f"LIVE MODE — orders will be submitted to Polymarket (capital=${args.capital:,.0f})")
+        except PolymarketExecutionDisabled as e:
+            print(f"ERROR: cannot enable --live: {e}", file=sys.stderr)
+            return 2
 
     market_kwargs: dict = {"limit": args.limit}
     if args.days_until_close is not None:
@@ -192,7 +220,7 @@ def main() -> int:
             print(f"    -> {decision.direction.value} (conf {decision.confidence:.2f})")
             print(f"       {decision.rationale[:200]}")
 
-        # Paper fill against the live order book (skip for HOLD or --no-fill).
+        # Fill: live order (--live) or paper simulation (default). Skip HOLD / --no-fill.
         if args.no_fill or decision.direction.value == "HOLD":
             if not args.quiet:
                 print()
@@ -204,6 +232,32 @@ def main() -> int:
                 print(f"    fill: SKIP — no token id available\n")
             continue
 
+        if live_executor is not None:
+            # --- Live execution path ---
+            result = live_executor.place_order(decision, token_id, args.capital)
+            fill_payload = {
+                "ts": now.isoformat(),
+                "market_id": m["id"],
+                "question": question,
+                "direction": decision.direction.value,
+                "yes_price_at_analysis": decision.yes_price_at_analysis,
+                "capital_usd": args.capital,
+                "live": True,
+                **result,
+            }
+            append_jsonl(fill_log_path, fill_payload)
+            if not args.quiet:
+                if result["status"] == "SUBMITTED":
+                    print(
+                        f"    order: SUBMITTED id={result['order_id']}  "
+                        f"${result['usd']:.2f} {result['direction']}"
+                    )
+                else:
+                    print(f"    order: {result['status']} — {result.get('reason', '')}")
+                print()
+            continue
+
+        # --- Paper simulation path ---
         try:
             book = get_order_book(token_id)
         except CLOBAPIError as e:
@@ -213,8 +267,7 @@ def main() -> int:
 
         fill = simulate_fill(book["asks"], budget_usd=args.budget)
 
-        # Negative-EV guard: if the position would lose money even when
-        # correct (the BUY at 99c trap), skip persisting it.
+        # Negative-EV guard: skip if position loses money even when correct.
         if fill["filled"] and not is_economic_when_correct(fill):
             net_if_win = (
                 fill["contracts"] * 1.0
