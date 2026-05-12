@@ -275,3 +275,49 @@ class PolymarketDecision(BaseModel):
         description="Polling cycle timestamp bucket. Used as part of the LangGraph thread id "
         "to prevent checkpoint collisions across cycles."
     )
+
+
+# ---------------------------------------------------------------------------
+# Stock trading decision schema (Phase C)
+# ---------------------------------------------------------------------------
+
+
+class StockDirection(str, Enum):
+    """Weekly directional position on a US equity."""
+
+    LONG = "LONG"
+    SHORT = "SHORT"
+    HOLD = "HOLD"
+
+
+class StockDecision(BaseModel):
+    """Trader output for a single stock analysis.
+
+    Phase C output contract: every stock analysed by `propagate_stock`
+    produces exactly this shape.
+    """
+
+    ticker: str = Field(description="Upper-case ticker symbol, e.g. 'AAPL'.")
+    direction: StockDirection = Field(
+        description="LONG (buy), SHORT (sell/short), or HOLD."
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Estimated probability the recommendation is correct, 0.0 to 1.0.",
+    )
+    rationale: str = Field(
+        description="One-paragraph reasoning. Cite specific evidence."
+    )
+    price_at_analysis: float = Field(
+        gt=0.0,
+        description="Last traded price when analysis was run.",
+    )
+    horizon_days: int = Field(
+        default=5,
+        description="Holding period in trading days (default: 5 = one week).",
+    )
+    cycle_ts: int = Field(
+        default=0,
+        description="Unix timestamp bucket for deduplication.",
+    )
