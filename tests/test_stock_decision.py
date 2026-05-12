@@ -1,6 +1,9 @@
 import pytest
 from pydantic import ValidationError
+from unittest.mock import MagicMock, patch
 from tradingagents.agents.schemas import StockDecision, StockDirection
+from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.default_config import DEFAULT_CONFIG
 
 
 def test_stock_direction_values():
@@ -42,3 +45,47 @@ def test_stock_decision_price_positive():
             ticker="AAPL", direction=StockDirection.LONG,
             confidence=0.6, rationale="x", price_at_analysis=-1.0,
         )
+
+
+def _mock_graph() -> TradingAgentsGraph:
+    config = {**DEFAULT_CONFIG, "llm_provider": "openrouter", "deep_think_llm": "test", "quick_think_llm": "test"}
+    with patch("tradingagents.graph.trading_graph.create_llm_client") as mock_llm:
+        mock_client = MagicMock()
+        mock_client.get_llm.return_value = MagicMock()
+        mock_llm.return_value = mock_client
+        return TradingAgentsGraph(config=config)
+
+
+def test_propagate_stock_hold_on_empty_news():
+    graph = _mock_graph()
+    with patch("tradingagents.dataflows.polymarket_news.search_event_news", return_value=[]):
+        _, decision = graph.propagate_stock("AAPL", price=185.0)
+    assert isinstance(decision, StockDecision)
+    assert decision.direction == StockDirection.HOLD
+    assert decision.confidence == 0.0
+    assert "LOW_CONFIDENCE" in decision.rationale
+
+
+def test_propagate_stock_returns_decision_with_news():
+    graph = _mock_graph()
+    fake_news = [{"title": "Apple beats earnings", "text": "Apple reported strong Q2.", "published_date": "2026-05-10"}]
+    fake_decision = StockDecision(
+        ticker="AAPL", direction=StockDirection.LONG,
+        confidence=0.70, rationale="Strong earnings.", price_at_analysis=185.0,
+    )
+    bull_update = {"investment_debate_state": {"bull_history": "Bull case here.", "bear_history": "", "history": "", "current_response": "", "judge_decision": "", "count": 1}}
+    bear_update = {"investment_debate_state": {"bull_history": "Bull case here.", "bear_history": "Bear case here.", "history": "", "current_response": "", "judge_decision": "", "count": 2}}
+    with patch("tradingagents.dataflows.polymarket_news.search_event_news", return_value=fake_news), \
+         patch("yfinance.Ticker") as mock_yf:
+        mock_yf.return_value.history.return_value = MagicMock(empty=True)
+        bull_node = MagicMock(return_value=bull_update)
+        bear_node = MagicMock(return_value=bear_update)
+        structured_llm = MagicMock()
+        structured_llm.invoke.return_value = fake_decision
+        with patch("tradingagents.agents.researchers.bull_researcher.create_bull_researcher", return_value=bull_node), \
+             patch("tradingagents.agents.researchers.bear_researcher.create_bear_researcher", return_value=bear_node):
+            graph.quick_thinking_llm = MagicMock()
+            graph.quick_thinking_llm.with_structured_output.return_value = structured_llm
+            _, decision = graph.propagate_stock("AAPL", price=185.0)
+    assert isinstance(decision, StockDecision)
+    assert decision.ticker == "AAPL"

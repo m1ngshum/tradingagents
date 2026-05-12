@@ -491,6 +491,172 @@ class TradingAgentsGraph:
 
         return (pm_state, decision)
 
+    def propagate_stock(
+        self,
+        ticker: str,
+        price: float,
+        horizon_days: int = 5,
+        poll_interval_seconds: int = 1800,
+        on_step=None,
+    ):
+        """Run the bull/bear/trader research pipeline for a single stock.
+
+        Reuses the same Exa news fetch + bull/bear debate pattern as
+        propagate_market, with stock-specific prompts and yfinance price context.
+
+        Returns:
+            tuple[dict, StockDecision]: state dict and final decision.
+        """
+        import time
+        import yfinance as yf
+        from tradingagents.dataflows.polymarket_news import search_event_news
+        from tradingagents.agents.researchers.bull_researcher import create_bull_researcher
+        from tradingagents.agents.researchers.bear_researcher import create_bear_researcher
+        from tradingagents.agents.schemas import StockDecision, StockDirection
+        from tradingagents.agents.utils.agent_states import InvestDebateState
+        from tradingagents.exchange import rate_limiter
+
+        cycle_ts = int(time.time() // poll_interval_seconds)
+        thread_label = f"stock_{ticker}_{cycle_ts}"
+
+        def _step(label: str) -> None:
+            if on_step is not None:
+                on_step(label)
+
+        if rate_limiter.is_exceeded():
+            status = rate_limiter.get_status()
+            return (
+                {"thread_label": thread_label, "rate_limited": True},
+                StockDecision(
+                    ticker=ticker,
+                    direction=StockDirection.HOLD,
+                    confidence=0.0,
+                    rationale=f"DAILY_LIMIT_EXCEEDED: {status['count']}/{status['limit']} calls used today.",
+                    price_at_analysis=price,
+                    cycle_ts=cycle_ts,
+                ),
+            )
+        rate_limiter.record_call()
+
+        try:
+            hist = yf.Ticker(ticker).history(period="5d")
+            if not hist.empty:
+                week_open = float(hist["Close"].iloc[0])
+                week_change_pct = round((price - week_open) / week_open * 100, 2)
+                price_context = (
+                    f"{ticker} closed at ${price:.2f}. "
+                    f"5-day change: {week_change_pct:+.1f}%."
+                )
+            else:
+                price_context = f"{ticker} current price: ${price:.2f}."
+        except Exception:
+            price_context = f"{ticker} current price: ${price:.2f}."
+
+        _step("fetching news context")
+        query = f"{ticker} stock outlook earnings news"
+        articles = search_event_news(query, limit=10)
+        if not articles:
+            return (
+                {"thread_label": thread_label, "low_confidence": True},
+                StockDecision(
+                    ticker=ticker,
+                    direction=StockDirection.HOLD,
+                    confidence=0.0,
+                    rationale="LOW_CONFIDENCE: insufficient news context (< 1 source)",
+                    price_at_analysis=price,
+                    cycle_ts=cycle_ts,
+                ),
+            )
+
+        news_blob = "\n\n".join(
+            f"--- ARTICLE (untrusted) ---\n"
+            f"Title: {a['title']}\n"
+            f"Date: {a.get('published_date', 'unknown')}\n"
+            f"Body: {a['text']}\n"
+            f"--- END ARTICLE ---"
+            for a in articles[:6]
+        )
+
+        stock_state = {
+            "messages": [],
+            "company_of_interest": ticker,
+            "trade_date": "",
+            "sender": "",
+            "market_report": price_context,
+            "sentiment_report": "",
+            "news_report": news_blob,
+            "fundamentals_report": "",
+            "investment_debate_state": InvestDebateState({
+                "bull_history": "",
+                "bear_history": "",
+                "history": "",
+                "current_response": "",
+                "judge_decision": "",
+                "count": 0,
+            }),
+            "investment_plan": "",
+            "trader_investment_plan": "",
+            "risk_debate_state": {},
+            "final_trade_decision": "",
+            "past_context": "",
+            "instrument_type": "stock",
+            "ticker": ticker,
+            "price": price,
+            "horizon_days": horizon_days,
+            "probability_report": "",
+        }
+
+        bull_node = create_bull_researcher(self.quick_thinking_llm)
+        bear_node = create_bear_researcher(self.quick_thinking_llm)
+
+        _step("bull researcher")
+        bull_update = bull_node(stock_state)
+        stock_state = {**stock_state, "investment_debate_state": bull_update["investment_debate_state"]}
+
+        _step("bear researcher")
+        bear_update = bear_node(stock_state)
+        stock_state = {**stock_state, "investment_debate_state": bear_update["investment_debate_state"]}
+
+        bull_arg = stock_state["investment_debate_state"].get("bull_history", "")
+        bear_arg = stock_state["investment_debate_state"].get("bear_history", "")
+
+        _step("trader synthesis")
+        trader_prompt = (
+            f"You are a disciplined equity trader. Your job is to decide whether to go "
+            f"LONG, SHORT, or HOLD on {ticker} over the next {horizon_days} trading days "
+            f"based on the bull/bear debate and current price context.\n\n"
+            f"PRICE CONTEXT: {price_context}\n\n"
+            f"BULL CASE:\n{bull_arg}\n\n"
+            f"BEAR CASE:\n{bear_arg}\n\n"
+            f"BASE-RATE SKEPTICISM (important): For individual stocks, the base rate of "
+            f"correctly predicting 5-day direction is roughly 50%. Only deviate from HOLD "
+            f"when you have strong, specific, recent evidence — not just general narrative. "
+            f"A high confidence score (> 0.65) requires concrete catalysts: earnings beats, "
+            f"analyst upgrades, product launches, or macro tailwinds specific to this sector. "
+            f"When evidence is mixed or narrative-only, return HOLD with confidence 0.50.\n\n"
+            f"Return a StockDecision with direction (LONG/SHORT/HOLD), confidence 0.0-1.0, "
+            f"and a one-paragraph rationale citing specific evidence. Set ticker='{ticker}', "
+            f"price_at_analysis={price}, horizon_days={horizon_days}."
+        )
+
+        structured_llm = self.quick_thinking_llm.with_structured_output(StockDecision)
+        try:
+            decision = structured_llm.invoke(trader_prompt)
+        except Exception as exc:
+            decision = StockDecision(
+                ticker=ticker,
+                direction=StockDirection.HOLD,
+                confidence=0.0,
+                rationale=f"SYNTHESIS_ERROR: {exc}",
+                price_at_analysis=price,
+                cycle_ts=cycle_ts,
+            )
+
+        decision = StockDecision(
+            **{**decision.model_dump(), "cycle_ts": cycle_ts}
+        )
+        return ({"thread_label": thread_label}, decision)
+
     def propagate(self, company_name, trade_date):
         """Run the trading agents graph for a company on a specific date.
 
