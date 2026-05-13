@@ -126,9 +126,10 @@ def main() -> int:
     market_kwargs: dict = {"limit": args.limit}
     if args.days_until_close is not None:
         today = datetime.now(timezone.utc).date()
+        tomorrow = today + timedelta(days=1)
         market_kwargs["order"] = "endDate"
         market_kwargs["ascending"] = True
-        market_kwargs["end_date_min"] = today.isoformat()
+        market_kwargs["end_date_min"] = tomorrow.isoformat()
         market_kwargs["end_date_max"] = (
             today + timedelta(days=args.days_until_close)
         ).isoformat()
@@ -183,7 +184,10 @@ def main() -> int:
         print(f"=== Analysing {len(markets)} markets with model={args.model} ===")
         print(f"  Decisions  -> {log_path}")
         if not args.no_fill:
-            print(f"  Paper fills -> {fill_log_path}  (budget=${args.budget:.0f}/decision)")
+            if live_executor is not None:
+                print(f"  Live orders -> {fill_log_path}  (capital=${args.capital:,.0f})")
+            else:
+                print(f"  Paper fills -> {fill_log_path}  (budget=${args.budget:.0f}/decision)")
         print()
 
     for i, m in enumerate(markets, start=1):

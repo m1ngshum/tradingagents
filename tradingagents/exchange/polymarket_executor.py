@@ -143,7 +143,7 @@ class PolymarketExecutor:
             key=private_key,
             chain_id=self._CHAIN_ID,
             creds=creds,
-            signature_type=1,   # proxy wallet (Type 1)
+            signature_type=0,   # EOA (Type 0) — key address == funder address
             funder=funder,
         )
         logger.info("PolymarketExecutor ready (funder=%s)", funder)
