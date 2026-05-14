@@ -112,17 +112,6 @@ def _normalise_market(raw: dict[str, Any]) -> dict[str, Any] | None:
     except (json.JSONDecodeError, ValueError, TypeError):
         pass
 
-    # tags: list of {id, label, slug} objects from Gamma. Normalised to a
-    # list of slug strings so callers can do simple membership tests.
-    raw_tags = raw.get("tags") or []
-    tag_slugs: list[str] = []
-    if isinstance(raw_tags, list):
-        for t in raw_tags:
-            if isinstance(t, dict):
-                slug = t.get("slug") or t.get("label") or ""
-                if slug:
-                    tag_slugs.append(str(slug).lower().replace(" ", "_"))
-
     return {
         "id": raw.get("id"),
         "question": raw.get("question"),
@@ -134,7 +123,6 @@ def _normalise_market(raw: dict[str, Any]) -> dict[str, Any] | None:
         "closed": bool(raw.get("closed", False)),
         "yes_token_id": yes_token_id,
         "no_token_id": no_token_id,
-        "tags": tag_slugs,
     }
 
 

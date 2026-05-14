@@ -89,14 +89,6 @@ def main() -> int:
             "tends to misprice. Default: 0 (no filter)."
         ),
     )
-    parser.add_argument(
-        "--exclude-categories",
-        default="",
-        help=(
-            "Comma-separated tag slugs to skip (e.g. election,crypto_price). "
-            "Matched against market tags using substring matching on the slug."
-        ),
-    )
     parser.add_argument("--quiet", action="store_true", help="Print only the JSONL path")
     parser.add_argument(
         "--live",
@@ -159,26 +151,6 @@ def main() -> int:
     except GammaAPIError as e:
         print(f"ERROR: Gamma fetch failed: {e}", file=sys.stderr)
         return 3
-
-    exclude_cats: list[str] = [
-        c.strip().lower().replace("-", "_")
-        for c in args.exclude_categories.split(",")
-        if c.strip()
-    ]
-    if exclude_cats:
-        before_cat = len(markets)
-        def _has_excluded_tag(m: dict) -> bool:
-            for tag in m.get("tags", []):
-                for exc in exclude_cats:
-                    if exc in tag or tag in exc:
-                        return True
-            return False
-        markets = [m for m in markets if not _has_excluded_tag(m)]
-        if not args.quiet:
-            print(
-                f"Excluded {before_cat - len(markets)} markets by category "
-                f"({', '.join(exclude_cats)}); {len(markets)} remaining"
-            )
 
     if args.min_liquidity > 0:
         before = len(markets)
