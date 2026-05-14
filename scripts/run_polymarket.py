@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
+from tradingagents.dataflows.market_classifier import classify_market
 from tradingagents.dataflows.polymarket_data import (
     CLOBAPIError,
     GammaAPIError,
@@ -89,6 +90,19 @@ def main() -> int:
             "tends to misprice. Default: 0 (no filter)."
         ),
     )
+    parser.add_argument(
+        "--exclude-categories",
+        default="election",
+        help=(
+            "Comma-separated market_classifier categories to drop after fetch. "
+            "Default 'election' (live accuracy on electoral markets is unproven; "
+            "see TODOS.md). Pass empty string to disable. Categories: election, "
+            "tournament_participation, concrete_event, geopolitical, regulatory, "
+            "appointment_outcome, talent_show_winner, individual_sport_game, "
+            "sport_team_game, esports_game, crypto_price, stock_price, "
+            "commodity_price, weather, celebrity_move, short_term_price, other."
+        ),
+    )
     parser.add_argument("--quiet", action="store_true", help="Print only the JSONL path")
     parser.add_argument(
         "--live",
@@ -134,12 +148,17 @@ def main() -> int:
             today + timedelta(days=args.days_until_close)
         ).isoformat()
 
+    excluded_categories = {
+        c.strip() for c in args.exclude_categories.split(",") if c.strip()
+    }
+
     # Over-fetch when filtering client-side so we still end up with --limit
-    # markets after low-liquidity ones are dropped.  When --days-until-close
-    # sorts by end date, high-liquidity markets are spread across the entire
-    # window (not clustered at the near end), so we need a much larger fetch.
+    # markets after low-liquidity / excluded-category ones are dropped.
+    # When --days-until-close sorts by end date, high-liquidity markets are
+    # spread across the entire window (not clustered at the near end), so we
+    # need a much larger fetch.
     fetch_limit = args.limit
-    if args.min_liquidity > 0:
+    if args.min_liquidity > 0 or excluded_categories:
         if args.days_until_close is not None:
             fetch_limit = max(args.limit * 20, 600)
         else:
@@ -155,12 +174,27 @@ def main() -> int:
     if args.min_liquidity > 0:
         before = len(markets)
         markets = [m for m in markets if m.get("liquidity", 0) >= args.min_liquidity]
-        markets = markets[: args.limit]
         if not args.quiet:
             print(
                 f"Filtered to {len(markets)} of {before} markets "
                 f"(liquidity >= ${args.min_liquidity:,.0f})"
             )
+
+    if excluded_categories:
+        before = len(markets)
+        kept = []
+        for m in markets:
+            cat = classify_market(m.get("question") or "").category
+            if cat not in excluded_categories:
+                kept.append(m)
+        markets = kept
+        if not args.quiet:
+            print(
+                f"Filtered to {len(markets)} of {before} markets "
+                f"(excluded categories: {sorted(excluded_categories)})"
+            )
+
+    markets = markets[: args.limit]
 
     if not markets:
         print(
