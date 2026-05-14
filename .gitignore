@@ -221,3 +221,7 @@ __marimo__/
 
 # Cache
 **/data_cache/
+
+# Claude Code / superpowers local artifacts (per-machine, not source)
+.claude/
+docs/superpowers/
