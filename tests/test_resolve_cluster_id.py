@@ -14,8 +14,18 @@ import pytest
 
 from tradingagents.dataflows.polymarket_data import (
     _base_slug,
+    _events_lookup_cached,
     resolve_cluster_id,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_events_cache():
+    """resolve_cluster_id uses functools.lru_cache on the events lookup;
+    clear between tests so mocks aren't shadowed by cached values."""
+    _events_lookup_cached.cache_clear()
+    yield
+    _events_lookup_cached.cache_clear()
 
 
 class TestBaseSlug:
@@ -40,9 +50,17 @@ class TestBaseSlug:
         None,
         "lynx-vs-wings-final",  # not a "say" market — no derivable base
         "spacex-starship-flight-12-launch-by-may-15",  # no "say"
+        # No stopword reached after "say" → must refuse fallback per F8
+        # (fail-safe: don't allow ungroupable slugs through the cluster cap).
+        "will-trump-say-ai",
     ])
     def test_returns_none_for_non_say_slugs(self, slug):
         assert _base_slug(slug) is None
+
+    def test_returns_slug_unchanged_when_no_keyword_between_say_and_stopword(self):
+        """Slug like 'will-trump-say-during-events' is already in base form."""
+        s = "will-trump-say-during-events-with-xi-jinping"
+        assert _base_slug(s) == s
 
 
 class TestResolveClusterId:

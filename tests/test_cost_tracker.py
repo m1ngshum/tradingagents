@@ -84,3 +84,33 @@ def test_missing_log_file_is_zero(tmp_path: Path):
     ct = CostTracker(decision_log_path=log, budget_usd=15.0)
     assert ct.spent_today() == 0.0
     assert ct.is_exhausted() is False
+
+
+def test_record_increments_in_process(tmp_path: Path):
+    """record() updates the in-memory cache without re-reading disk."""
+    log = tmp_path / "decisions-2026-05-16.jsonl"
+    append_jsonl(log, {"cost_usd": 0.10})
+    ct = CostTracker(decision_log_path=log, budget_usd=1.0)
+    assert ct.spent_today() == pytest.approx(0.10)
+    ct.record(0.25)
+    assert ct.spent_today() == pytest.approx(0.35)
+    ct.record(0.50)
+    assert ct.spent_today() == pytest.approx(0.85)
+
+
+def test_record_handles_none_and_non_numeric(tmp_path: Path):
+    """Callers may pass None or junk — must not raise, must not crash."""
+    log = tmp_path / "decisions-2026-05-16.jsonl"
+    ct = CostTracker(decision_log_path=log, budget_usd=1.0)
+    ct.record(None)
+    ct.record("not a number")
+    assert ct.spent_today() == 0.0
+
+
+def test_record_triggers_initial_load_if_needed(tmp_path: Path):
+    """If record() is the first call, it must seed from disk first."""
+    log = tmp_path / "decisions-2026-05-16.jsonl"
+    append_jsonl(log, {"cost_usd": 0.10})
+    ct = CostTracker(decision_log_path=log, budget_usd=1.0)
+    ct.record(0.20)  # before any spent_today() call
+    assert ct.spent_today() == pytest.approx(0.30)

@@ -32,7 +32,7 @@ from tradingagents.exchange.io_utils import POLYMARKET_OUTPUT_DIR
 from tradingagents.exchange.scoring import (
     MarketOutcome,
     fetch_outcomes,
-    load_fills_jsonl,
+    load_jsonl_rows,
     score_position,
 )
 
@@ -58,7 +58,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    fills = load_fills_jsonl(POLYMARKET_OUTPUT_DIR, date=args.date)
+    fills = load_jsonl_rows(POLYMARKET_OUTPUT_DIR, date=args.date)
     if not fills:
         target = args.date or "all dates"
         print(f"No fills found for {target}.", file=sys.stderr)

@@ -11,6 +11,7 @@ outcomePrices are filtered out rather than crashing the caller.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 from typing import Any
@@ -280,6 +281,9 @@ def get_order_book(token_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+_SAY_STOPWORDS = frozenset({"during", "by", "before", "after", "on", "at", "in", "to"})
+
+
 def _base_slug(slug: str) -> str | None:
     """Strip the trailing keyword from a market slug.
 
@@ -287,22 +291,54 @@ def _base_slug(slug: str) -> str | None:
         will-trump-say-ai-during-events-with-xi-jinping
       → will-trump-say-during-events-with-xi-jinping
 
-    The heuristic: drop the segment that follows the verb. For "will-X-say-Y-..."
-    slugs, drop "y". For other patterns, return None (caller refuses the BUY).
+    The heuristic: find the FIRST "say" token, then drop everything between it
+    and the first stopword that follows. Requires a stopword to exist after the
+    keyword — without one, the slug has no event-context boundary and we
+    refuse to fall back (returning None forces the caller to refuse the BUY,
+    which is the fail-safe per F8 of the PR plan).
     """
     if not slug:
         return None
     parts = slug.split("-")
-    if "say" in parts:
-        i = parts.index("say")
-        # Drop the keyword(s) immediately after "say" up to the next stopword.
-        stopwords = {"during", "by", "before", "after", "on", "at", "in", "to"}
-        # Find first stopword after "say"
-        j = i + 1
-        while j < len(parts) and parts[j] not in stopwords:
-            j += 1
-        if j > i + 1:
-            return "-".join(parts[:i+1] + parts[j:])
+    if "say" not in parts:
+        return None
+    i = parts.index("say")
+    # Find first stopword strictly after "say".
+    j = i + 1
+    while j < len(parts) and parts[j] not in _SAY_STOPWORDS:
+        j += 1
+    # No stopword reached → slug has no event-context anchor; refuse fallback.
+    if j == len(parts):
+        return None
+    # No keyword between "say" and the stopword → slug already in base form.
+    if j == i + 1:
+        return slug
+    return "-".join(parts[:i + 1] + parts[j:])
+
+
+@functools.lru_cache(maxsize=512)
+def _events_lookup_cached(slug: str) -> str | None:
+    """Cached `/events?slug=<slug>` lookup. Returns event_id or None.
+
+    Cached per-process so duplicate slugs across the loop (or across
+    discover + run_polymarket in the same fire) share one HTTP call.
+    Cache is unbounded by slug count in practice — Polymarket has < 10k
+    open events at any time.
+    """
+    try:
+        resp = _http_get_with_retry(
+            f"{GAMMA_BASE}/events",
+            timeout=DEFAULT_TIMEOUT,
+            params={"slug": slug, "limit": 1},
+        )
+        events = resp.json()
+        if isinstance(events, list) and events:
+            return events[0].get("id") or None
+    except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as e:
+        logger.warning(
+            "events lookup failed for slug %s: %s — falling back to synthetic",
+            slug, e,
+        )
     return None
 
 
@@ -317,7 +353,8 @@ def resolve_cluster_id(
       1. `negRiskRequestID` on the market itself — Polymarket's native sibling
          ID. Cheapest and most authoritative.
       2. `/events?slug=<base-slug>` — find the parent event whose markets list
-         includes this one. Costs one extra HTTP call per unique slug-base.
+         includes this one. Costs one extra HTTP call per unique slug-base
+         (LRU-cached per process).
          Skipped when `allow_events_lookup=False` (test path or cost-sensitive
          caller).
       3. Synthetic `unknown:<base-slug>` — sibling markets with the same base
@@ -333,22 +370,9 @@ def resolve_cluster_id(
     slug = market.get("slug") or ""
 
     if allow_events_lookup and slug:
-        try:
-            resp = _http_get_with_retry(
-                f"{GAMMA_BASE}/events",
-                timeout=DEFAULT_TIMEOUT,
-                params={"slug": slug, "limit": 1},
-            )
-            events = resp.json()
-            if isinstance(events, list) and events:
-                event_id = events[0].get("id")
-                if event_id:
-                    return f"event:{event_id}"
-        except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as e:
-            logger.warning(
-                "events lookup failed for slug %s: %s — falling back to synthetic",
-                slug, e,
-            )
+        event_id = _events_lookup_cached(slug)
+        if event_id:
+            return f"event:{event_id}"
 
     base = _base_slug(slug)
     if base:

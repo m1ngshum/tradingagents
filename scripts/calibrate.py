@@ -39,7 +39,7 @@ from tradingagents.dataflows.polymarket_data import get_market_by_id
 from tradingagents.exchange.scoring import (
     MarketOutcome,
     fetch_outcomes,
-    load_fills_jsonl,
+    load_jsonl_rows,
 )
 
 
@@ -84,6 +84,18 @@ def main() -> int:
         print(f"ERROR: {polymarket_dir} does not exist", file=sys.stderr)
         return 2
 
+    # Sandbox --output to the user's home dir or /tmp. Prevents accidentally
+    # (or via a piped-in arg) clobbering system paths like /etc/crontab.
+    if args.output is not None:
+        resolved = args.output.resolve()
+        allowed_roots = (Path.home().resolve(), Path("/tmp").resolve())
+        if not any(str(resolved).startswith(str(root)) for root in allowed_roots):
+            print(
+                f"ERROR: --output must be within home or /tmp, got {resolved}",
+                file=sys.stderr,
+            )
+            return 2
+
     out: TextIO = open(args.output, "w") if args.output else sys.stdout
 
     # ---------- Load decisions (what the bot DECIDED to do) ----------
@@ -94,7 +106,7 @@ def main() -> int:
     #     — those represent real signal the bot had, just not actionable trades.
     # The is-it-actionable question lives in score_fills.py; the does-the-bot-
     # have-edge question lives here.
-    decisions = load_fills_jsonl(
+    decisions = load_jsonl_rows(
         polymarket_dir,
         glob_pattern="decisions-*.jsonl",
     )

@@ -9,7 +9,7 @@ Pure functions:
     pending positions.
 
 I/O helpers (gamma + filesystem):
-  - load_fills_jsonl(path_or_dir, date=None) -> list[dict]
+  - load_jsonl_rows(path_or_dir, date=None) -> list[dict]
     Read fills from one date or all dates, tolerating corrupted lines.
   - fetch_outcomes(market_ids) -> dict[str, dict]
     Per-market gamma fetch with per-market GammaAPIError isolation.
@@ -182,7 +182,7 @@ def score_position(
 # ---------------------------------------------------------------------------
 
 
-def load_fills_jsonl(
+def load_jsonl_rows(
     fills_dir: Path,
     date: str | None = None,
     glob_pattern: str = "paper-fills-*.jsonl",
@@ -278,3 +278,30 @@ def fetch_outcomes(
             "is_finalized": is_uma_finalized(m),
         }
     return out
+
+
+def count_fills_by_cluster(
+    fills_dir: Path,
+    date: str,
+    *,
+    exclude_statuses: tuple[str, ...] = ("SKIPPED", "ERROR"),
+) -> dict[str, int]:
+    """Count placed BUY positions per cluster_id in a day's fills.
+
+    Used by the cluster-cap gate in run_polymarket.py (and any future caller
+    that needs the same view). SKIPPED rows are audit-trail, not positions,
+    and must not count against the cap.
+    """
+    from collections import Counter
+    fill_log = fills_dir / f"paper-fills-{date}.jsonl"
+    if not fill_log.exists():
+        return {}
+    fills = load_jsonl_rows(fills_dir, date=date)
+    counts: Counter = Counter()
+    for f in fills:
+        if f.get("status") in exclude_statuses:
+            continue
+        cid = f.get("cluster_id")
+        if cid:
+            counts[cid] += 1
+    return dict(counts)
