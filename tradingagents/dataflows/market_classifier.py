@@ -57,6 +57,14 @@ class Classification:
 # BAD-fit patterns (skip these — bot has no edge)
 
 _RANDOM_WALK_PATTERNS = [
+    # Speech-keyword markets — "Will X say 'Y' during Z?" patterns.
+    # Why: historically lose as a correlated cluster (7-of-7 on Trump-Xi event,
+    # 2026-05-14). The LLM analyzes each keyword independently and can't see
+    # they're a single thesis split across many tickets. Anchored on a quoted
+    # word, so cheap to evaluate — keep at the top of the BAD list.
+    (r"\bsay\s+\"[^\"]+\"",
+     "speech_keyword", "specific-word utterance market = correlated cluster, no edge"),
+
     # Crypto price moves
     (r"\b(bitcoin|btc|ethereum|eth|sol|solana|xrp|doge|dogecoin)\s+up\s+or\s+down\b",
      "crypto_price", "5-min crypto direction is a random walk"),
@@ -135,15 +143,6 @@ _RANDOM_WALK_PATTERNS = [
      "sport_team_game", "team name with sports suffix"),
     (r"\b(united|city|wanderers|rovers|athletic|olympique)\b.*\b(vs|win|draw)\b",
      "sport_team_game", "football club"),
-
-    # Speech-keyword markets — "Will X say 'Y' during Z?" patterns.
-    # Why: historically lose as a correlated cluster (7-of-7 on Trump-Xi event,
-    # 2026-05-14). The LLM analyzes each keyword independently and can't see
-    # they're a single thesis split across many tickets.
-    (r"\bsay\s+\"[^\"]+\"",
-     "speech_keyword", "specific-word utterance market = correlated cluster, no edge"),
-    (r"\bwill\s+\w+\s+say\s+\"",
-     "speech_keyword", "specific-word utterance market = correlated cluster, no edge"),
 
     # Celebrity / random individual decisions
     (r"\bwill\s+\w+\s+retire\b",
@@ -226,14 +225,14 @@ def classify_market(question: str) -> Classification:
     if not question:
         return Classification("other", "neutral", "empty question")
 
-    q = question.lower().strip()
+    q = question.strip()
 
-    # Check BAD patterns first — skip these regardless of LLM signal
+    # Patterns use re.IGNORECASE so we don't lower-case q (which would also
+    # break patterns like `[A-Z]{2,5}` for stock tickers).
     for pat, cat, reason in _RANDOM_WALK_PATTERNS:
         if re.search(pat, q, re.IGNORECASE):
             return Classification(cat, "bad", reason)
 
-    # Check GOOD patterns — prioritize for analysis
     for pat, cat, reason in _GOOD_FIT_PATTERNS:
         if re.search(pat, q, re.IGNORECASE):
             return Classification(cat, "good", reason)
