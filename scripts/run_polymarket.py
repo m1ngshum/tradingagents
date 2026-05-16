@@ -25,14 +25,18 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
+from collections import Counter
+
 from tradingagents.dataflows.market_classifier import classify_market
 from tradingagents.dataflows.polymarket_data import (
     CLOBAPIError,
     GammaAPIError,
     get_open_markets,
     get_order_book,
+    resolve_cluster_id,
 )
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.exchange.cost_tracker import CostTracker
 from tradingagents.exchange.io_utils import POLYMARKET_OUTPUT_DIR, append_jsonl
 from tradingagents.exchange.paper_fill import is_economic_when_correct, simulate_fill
 from tradingagents.exchange.polymarket_executor import (
@@ -50,6 +54,30 @@ def _decision_log_path(now: datetime) -> Path:
 
 def _fill_log_path(now: datetime) -> Path:
     return POLYMARKET_OUTPUT_DIR / f"paper-fills-{now.strftime('%Y-%m-%d')}.jsonl"
+
+
+def _cluster_counts_today(fill_log_path: Path) -> Counter:
+    """Count BUY positions per cluster_id in today's fills.
+
+    SKIPPED rows and rows without cluster_id are excluded. Tolerates corrupted
+    JSONL lines via the shared `load_fills_jsonl` helper.
+    """
+    from tradingagents.exchange.scoring import load_fills_jsonl
+    if not fill_log_path.exists():
+        return Counter()
+    fills = load_fills_jsonl(
+        fill_log_path.parent,
+        date=fill_log_path.stem.removeprefix("paper-fills-"),
+    )
+    counts: Counter = Counter()
+    for f in fills:
+        # Only count actually-placed BUY positions, not SKIPPED rows.
+        if f.get("status") in ("SKIPPED", "ERROR"):
+            continue
+        cid = f.get("cluster_id")
+        if cid:
+            counts[cid] += 1
+    return counts
 
 
 def main() -> int:
@@ -113,6 +141,30 @@ def main() -> int:
             "logged to paper-fills-*.jsonl with reason 'below_min_confidence'. "
             f"Default {DEFAULT_CONFIG['polymarket_min_confidence']} (calibration-derived; "
             "see docs/PLAN-research-capture-and-cluster-cap.md). Pass 0.0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "--daily-budget-usd",
+        type=float,
+        default=float(os.environ.get("TRADINGAGENTS_POLYMARKET_DAILY_BUDGET_USD", "15.0")),
+        help=(
+            "Hard ceiling on today's LLM spend for this routine. When today's "
+            "decisions-*.jsonl sums to >= this value, further markets are "
+            "SKIPPED with reason 'daily_budget_exceeded' and the routine "
+            "completes gracefully (state still pushed). Default $15 "
+            "(env: TRADINGAGENTS_POLYMARKET_DAILY_BUDGET_USD). Pass 0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "--max-per-cluster",
+        type=int,
+        default=1,
+        help=(
+            "Maximum BUY positions to take in any single cluster (Polymarket "
+            "negRisk sibling group OR shared event). Default 1 (most "
+            "conservative — addresses the 2026-05-14 Trump-Xi 7-of-7 trap). "
+            "Pass 0 to disable. Skipped trades are logged with reason "
+            "'cluster_full' or 'cluster_unknown' to paper-fills-*.jsonl."
         ),
     )
     parser.add_argument("--quiet", action="store_true", help="Print only the JSONL path")
@@ -238,6 +290,7 @@ def main() -> int:
     now = datetime.now(timezone.utc)
     log_path = _decision_log_path(now)
     fill_log_path = _fill_log_path(now)
+    cost_tracker = CostTracker(decision_log_path=log_path, budget_usd=args.daily_budget_usd)
 
     if not args.quiet:
         print(f"=== Analysing {len(markets)} markets with model={args.model} ===")
@@ -254,6 +307,29 @@ def main() -> int:
         if not args.quiet:
             print(f"--- [{i}/{len(markets)}] {question[:80]}")
             print(f"    yes_price={m['yes_price']:.3f}  end={m.get('end_date')}")
+
+        # Pre-flight budget check. Must fire BEFORE the LLM call to actually
+        # save money. Logs a decision-row stub so the audit trail shows what
+        # we skipped and why.
+        if cost_tracker.is_exhausted():
+            status = cost_tracker.status()
+            skip_payload = {
+                "ts": now.isoformat(),
+                "model": args.model,
+                "market_id": m["id"],
+                "question": question,
+                "direction": "SKIPPED",
+                "reason": "daily_budget_exceeded",
+                "spent_today_usd": status["spent_today_usd"],
+                "budget_usd": status["budget_usd"],
+            }
+            append_jsonl(log_path, skip_payload)
+            if not args.quiet:
+                print(
+                    f"    SKIP — daily_budget_exceeded "
+                    f"(spent ${status['spent_today_usd']:.2f} / ${status['budget_usd']:.2f})\n"
+                )
+            continue
 
         def _on_step(label: str) -> None:
             if not args.quiet:
@@ -314,6 +390,46 @@ def main() -> int:
                 )
             continue
 
+        # Cluster cap. Groups correlated markets via Polymarket's negRisk
+        # sibling ID or shared event, with a synthetic base-slug fallback.
+        # See PLAN-research-capture-and-cluster-cap.md F8 — default is fail-safe:
+        # markets that can't be grouped are REFUSED, not allowed through.
+        cluster_id = resolve_cluster_id(m) if args.max_per_cluster > 0 else None
+        if args.max_per_cluster > 0:
+            if cluster_id is None:
+                skip_payload = {
+                    "ts": now.isoformat(),
+                    "market_id": m["id"],
+                    "question": question,
+                    "direction": decision.direction.value,
+                    "status": "SKIPPED",
+                    "reason": "cluster_unknown",
+                    "slug": m.get("slug"),
+                }
+                append_jsonl(fill_log_path, skip_payload)
+                if not args.quiet:
+                    print(f"    fill: SKIP — cluster_unknown (cannot group market safely)\n")
+                continue
+            current_counts = _cluster_counts_today(fill_log_path)
+            if current_counts.get(cluster_id, 0) >= args.max_per_cluster:
+                skip_payload = {
+                    "ts": now.isoformat(),
+                    "market_id": m["id"],
+                    "question": question,
+                    "direction": decision.direction.value,
+                    "cluster_id": cluster_id,
+                    "status": "SKIPPED",
+                    "reason": "cluster_full",
+                    "max_per_cluster": args.max_per_cluster,
+                }
+                append_jsonl(fill_log_path, skip_payload)
+                if not args.quiet:
+                    print(
+                        f"    fill: SKIP — cluster_full "
+                        f"({current_counts[cluster_id]}/{args.max_per_cluster} in cluster {cluster_id})\n"
+                    )
+                continue
+
         token_id = m.get("yes_token_id") if decision.direction.value == "BUY_YES" else m.get("no_token_id")
         if not token_id:
             if not args.quiet:
@@ -330,6 +446,7 @@ def main() -> int:
                 "direction": decision.direction.value,
                 "yes_price_at_analysis": decision.yes_price_at_analysis,
                 "capital_usd": args.capital,
+                "cluster_id": cluster_id,
                 "live": True,
                 **result,
             }
@@ -377,6 +494,7 @@ def main() -> int:
             "direction": decision.direction.value,
             "yes_price_at_analysis": decision.yes_price_at_analysis,
             "budget_usd": args.budget,
+            "cluster_id": cluster_id,
             **fill,
         }
         append_jsonl(fill_log_path, fill_payload)

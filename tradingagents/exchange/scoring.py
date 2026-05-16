@@ -1,21 +1,35 @@
 """Score paper fills against Polymarket resolution outcomes.
 
-Two pure functions:
+Pure functions:
   - classify_outcome(closed, outcome_prices) -> (MarketOutcome, current_yes_price)
-    Reads the gamma `/markets` response fields and decides whether the market
-    has resolved YES/NO/50-50, is still trading, or is in the UMA dispute window.
+    Reads gamma `/markets` response fields and decides whether the market has
+    resolved YES/NO/50-50, is still trading, or is in the UMA dispute window.
   - score_position(fill, outcome, current_yes_price) -> dict
     Computes realized P&L for resolved outcomes and mark-to-market P&L for
     pending positions.
 
-Deterministic, no I/O. The CLI in scripts/score_fills.py wraps these with
-gamma fetches and JSONL aggregation.
+I/O helpers (gamma + filesystem):
+  - load_fills_jsonl(path_or_dir, date=None) -> list[dict]
+    Read fills from one date or all dates, tolerating corrupted lines.
+  - fetch_outcomes(market_ids) -> dict[str, dict]
+    Per-market gamma fetch with per-market GammaAPIError isolation.
+  - is_uma_finalized(market) -> bool
+    True only when umaResolutionStatuses contains "resolved" (excludes proposed
+    state where UMA dispute window is still open).
+
+Both score_fills.py and calibrate.py consume these — single source of truth.
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import sys
 from enum import Enum
-from typing import Any
+from pathlib import Path
+from typing import Any, Iterable
+
+logger = logging.getLogger(__name__)
 
 
 class MarketOutcome(str, Enum):
@@ -161,3 +175,106 @@ def score_position(
         "pnl_usd": round(-filled_usd, 6),
         "roi": -1.0 if filled_usd > 0 else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# I/O helpers — shared between score_fills.py and calibrate.py
+# ---------------------------------------------------------------------------
+
+
+def load_fills_jsonl(
+    fills_dir: Path,
+    date: str | None = None,
+    glob_pattern: str = "paper-fills-*.jsonl",
+) -> list[dict]:
+    """Load fills from one date or all dates under fills_dir.
+
+    Tolerates corrupted JSONL lines (mid-write truncation, partial bytes from
+    overlapping fires) — logs a warning and skips the bad line.
+    """
+    if date:
+        # Replace the '*' wildcard with the specific date.
+        filename = glob_pattern.replace("*", date)
+        paths = [fills_dir / filename]
+    else:
+        paths = sorted(fills_dir.glob(glob_pattern))
+
+    fills: list[dict] = []
+    for path in paths:
+        if not path.exists():
+            continue
+        with path.open("r", encoding="utf-8") as f:
+            for lineno, raw in enumerate(f, start=1):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    fills.append(json.loads(raw))
+                except json.JSONDecodeError as e:
+                    logger.warning(
+                        "skipping corrupted line %s in %s: %s",
+                        lineno, path, e,
+                    )
+                    continue
+    return fills
+
+
+def is_uma_finalized(market: dict) -> bool:
+    """True only when UMA resolution is finalized (not just proposed).
+
+    The Gamma `closed` boolean can be True while UMA is still in the dispute
+    window (umaResolutionStatuses contains 'proposed' but not 'resolved').
+    Calibration computations should exclude proposed-but-not-final outcomes
+    OR report them in a separate column. See PLAN-research-capture-and-cluster-cap.md F12.
+    """
+    raw = market.get("umaResolutionStatuses")
+    if not raw:
+        return False
+    try:
+        statuses = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return any(s == "resolved" for s in statuses)
+
+
+def fetch_outcomes(
+    market_ids: Iterable[str],
+    fetch_market: Any,
+) -> dict[str, dict]:
+    """Fetch each market once with per-market error isolation.
+
+    Args:
+        market_ids: iterable of market IDs to fetch.
+        fetch_market: callable taking a market_id, returning a normalised dict
+            with at least 'closed', 'yes_price', and (optionally) the raw
+            gamma fields needed for `is_uma_finalized`. In practice this is
+            polymarket_data.get_market_by_id.
+
+    Returns:
+        {market_id: {outcome, current_yes_price, is_finalized}}
+    """
+    # Import here to avoid circular import (polymarket_data may import scoring helpers).
+    from tradingagents.dataflows.polymarket_data import GammaAPIError
+
+    out: dict[str, dict] = {}
+    for mid in sorted(set(market_ids)):
+        try:
+            m = fetch_market(mid)
+        except GammaAPIError as e:
+            print(f"  warn: market {mid} fetch failed: {e}", file=sys.stderr)
+            out[mid] = {
+                "outcome": MarketOutcome.UNKNOWN,
+                "current_yes_price": None,
+                "is_finalized": False,
+            }
+            continue
+
+        # Normalised dict exposes yes_price + closed; reconstruct prices for classify.
+        prices = [m["yes_price"], 1.0 - m["yes_price"]]
+        outcome, current_yes = classify_outcome(closed=m["closed"], outcome_prices=prices)
+        out[mid] = {
+            "outcome": outcome,
+            "current_yes_price": current_yes,
+            "is_finalized": is_uma_finalized(m),
+        }
+    return out
