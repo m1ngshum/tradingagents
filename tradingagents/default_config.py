@@ -62,4 +62,9 @@ DEFAULT_CONFIG = {
     "tool_vendors": {
         # Example: "get_stock_data": "alpha_vantage",  # Override category default
     },
+    # Calibration-derived gate. Source: docs/PLAN-research-capture-and-cluster-cap.md
+    # n=17 resolved trades; conf>=0.9 won 2/2, conf in [0.7, 0.85) won 1/7.
+    # Single source of truth for run_polymarket.py default + trader prompt reference.
+    # Bump as the calibration corpus grows.
+    "polymarket_min_confidence": 0.85,
 }
