@@ -36,6 +36,7 @@ Category = Literal[
     "weather",
     "celebrity_move",
     "short_term_price",
+    "speech_keyword",
     "other",
 ]
 
@@ -134,6 +135,15 @@ _RANDOM_WALK_PATTERNS = [
      "sport_team_game", "team name with sports suffix"),
     (r"\b(united|city|wanderers|rovers|athletic|olympique)\b.*\b(vs|win|draw)\b",
      "sport_team_game", "football club"),
+
+    # Speech-keyword markets — "Will X say 'Y' during Z?" patterns.
+    # Why: historically lose as a correlated cluster (7-of-7 on Trump-Xi event,
+    # 2026-05-14). The LLM analyzes each keyword independently and can't see
+    # they're a single thesis split across many tickets.
+    (r"\bsay\s+\"[^\"]+\"",
+     "speech_keyword", "specific-word utterance market = correlated cluster, no edge"),
+    (r"\bwill\s+\w+\s+say\s+\"",
+     "speech_keyword", "specific-word utterance market = correlated cluster, no edge"),
 
     # Celebrity / random individual decisions
     (r"\bwill\s+\w+\s+retire\b",
