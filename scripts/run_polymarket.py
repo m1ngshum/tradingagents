@@ -106,12 +106,13 @@ def main() -> int:
     parser.add_argument(
         "--min-confidence",
         type=float,
-        default=0.0,
+        default=DEFAULT_CONFIG["polymarket_min_confidence"],
         help=(
-            "Skip filling BUY_YES/BUY_NO decisions below this confidence. "
-            "Decision is still logged with reason 'below_min_confidence' for audit. "
-            "Default 0.0 disables the gate. Calibration analysis showed conf<0.85 "
-            "wins ~33%% vs 100%% at conf>=0.9 (n=17, see docs/PLAN-research-capture-and-cluster-cap.md)."
+            "Skip filling BUY_YES/BUY_NO decisions below this confidence. The "
+            "decision row is logged to decisions-*.jsonl, and a SKIPPED row is "
+            "logged to paper-fills-*.jsonl with reason 'below_min_confidence'. "
+            f"Default {DEFAULT_CONFIG['polymarket_min_confidence']} (calibration-derived; "
+            "see docs/PLAN-research-capture-and-cluster-cap.md). Pass 0.0 to disable."
         ),
     )
     parser.add_argument("--quiet", action="store_true", help="Print only the JSONL path")
@@ -131,6 +132,19 @@ def main() -> int:
         help="Total capital in USDC for Kelly sizing when --live is set (default: 1000.0)",
     )
     args = parser.parse_args()
+
+    # Validate --min-confidence. `float("nan")` parses cleanly but breaks the
+    # gate silently (nan comparisons always return False), and values outside
+    # [0, 1] silently block-all or never-fire. Both are unsafe in --live mode.
+    import math
+    if (
+        not math.isfinite(args.min_confidence)
+        or not (0.0 <= args.min_confidence <= 1.0)
+    ):
+        parser.error(
+            f"--min-confidence must be a finite number in [0.0, 1.0], "
+            f"got {args.min_confidence}"
+        )
 
     if not os.environ.get("EXA_API_KEY"):
         print("ERROR: EXA_API_KEY not set in environment or .env", file=sys.stderr)
@@ -275,14 +289,28 @@ def main() -> int:
                 print()
             continue
 
-        # Confidence gate: calibration showed conf<0.85 wins ~33% across all bands;
-        # conf>=0.9 wins 100% on the small sample (n=2). The gate keeps the routine
-        # running but suppresses low-conviction fills.
+        # Confidence gate. Calibration: conf<0.85 wins ~33% on n=15;
+        # conf>=0.9 wins 100% on n=2. The gate keeps the routine running but
+        # suppresses low-conviction fills. Logs a SKIPPED row to the fill JSONL
+        # so the audit trail is complete — the decision file shows what the
+        # bot decided, the fill file shows what actually executed (or didn't).
         if decision.confidence < args.min_confidence:
+            skip_payload = {
+                "ts": now.isoformat(),
+                "market_id": m["id"],
+                "question": question,
+                "direction": decision.direction.value,
+                "confidence": decision.confidence,
+                "yes_price_at_analysis": decision.yes_price_at_analysis,
+                "status": "SKIPPED",
+                "reason": "below_min_confidence",
+                "min_confidence": args.min_confidence,
+            }
+            append_jsonl(fill_log_path, skip_payload)
             if not args.quiet:
                 print(
                     f"    fill: SKIP — confidence {decision.confidence:.2f} "
-                    f"< --min-confidence {args.min_confidence}\n"
+                    f"< --min-confidence {args.min_confidence:.2f}\n"
                 )
             continue
 
