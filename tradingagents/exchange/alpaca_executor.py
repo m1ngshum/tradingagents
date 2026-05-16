@@ -10,6 +10,7 @@ Real-money execution requires ALPACA_PAPER=false AND both key env vars set.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from typing import Any
 
@@ -23,8 +24,13 @@ _MAX_FRACTION = 0.10
 
 try:
     from alpaca.trading.client import TradingClient
+    from alpaca.trading.enums import OrderSide, TimeInForce
+    from alpaca.trading.requests import MarketOrderRequest
 except ImportError:
     TradingClient = None  # type: ignore[assignment,misc]
+    MarketOrderRequest = None  # type: ignore[assignment,misc]
+    OrderSide = None  # type: ignore[assignment,misc]
+    TimeInForce = None  # type: ignore[assignment,misc]
 
 
 class AlpacaExecutionDisabled(Exception):
@@ -111,23 +117,49 @@ class AlpacaExecutor:
                 "ticker": decision.ticker,
             }
 
-        side_str = "buy" if decision.direction == StockDirection.LONG else "sell"
+        is_long = decision.direction == StockDirection.LONG
+        side_str = "buy" if is_long else "sell"
+        side = OrderSide.BUY if is_long else OrderSide.SELL
+
+        # Alpaca rejects fractional shorts (error 42210000). For SHORT, floor
+        # notional/price to whole shares and skip if it rounds to 0.
+        if is_long:
+            req_kwargs: dict[str, Any] = {"notional": sizing["usd"]}
+            size_log = f"notional=${sizing['usd']:.2f}"
+        else:
+            price = decision.price_at_analysis
+            if price <= 0:
+                return {
+                    "status": "SKIPPED",
+                    "reason": f"invalid price_at_analysis={price} for SHORT qty calc",
+                    "sizing": sizing,
+                    "ticker": decision.ticker,
+                }
+            qty = math.floor(sizing["usd"] / price)
+            if qty < 1:
+                return {
+                    "status": "SKIPPED",
+                    "reason": (
+                        f"SHORT qty rounds to 0 (notional ${sizing['usd']:.2f} / "
+                        f"price ${price:.2f}); Alpaca rejects fractional shorts"
+                    ),
+                    "sizing": sizing,
+                    "ticker": decision.ticker,
+                }
+            req_kwargs = {"qty": qty}
+            size_log = f"qty={qty} (${qty * price:.2f})"
 
         try:
-            from alpaca.trading.requests import MarketOrderRequest
-            from alpaca.trading.enums import OrderSide, TimeInForce
-
-            side = OrderSide.BUY if decision.direction == StockDirection.LONG else OrderSide.SELL
             req = MarketOrderRequest(
                 symbol=decision.ticker,
-                notional=sizing["usd"],
                 side=side,
                 time_in_force=TimeInForce.DAY,
+                **req_kwargs,
             )
             order = self._client.submit_order(req)
             logger.info(
-                "Alpaca %s order submitted: ticker=%s notional=$%.2f id=%s",
-                side_str, decision.ticker, sizing["usd"], order.id,
+                "Alpaca %s order submitted: ticker=%s %s id=%s",
+                side_str, decision.ticker, size_log, order.id,
             )
             return {
                 "status": "SUBMITTED",
