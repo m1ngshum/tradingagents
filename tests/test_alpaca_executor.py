@@ -131,6 +131,68 @@ def test_zero_sizing_returns_skipped(monkeypatch):
     assert result["status"] == "SKIPPED"
 
 
+def test_short_order_uses_integer_qty_not_notional(monkeypatch):
+    """Alpaca rejects fractional shorts (code 42210000). SHORT orders must use
+    qty=<int> (floored from notional/price), not notional=<float>."""
+    monkeypatch.setenv("ALPACA_API_KEY", "fake_key")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "fake_secret")
+    monkeypatch.setenv("ALPACA_PAPER", "true")
+    fake_order = MagicMock(); fake_order.id = "order-789"; fake_order.status = "accepted"
+    with patch("tradingagents.exchange.alpaca_executor.TradingClient") as mock_tc, \
+         patch("tradingagents.exchange.alpaca_executor.MarketOrderRequest") as mock_req:
+        mock_client = MagicMock(); mock_client.submit_order.return_value = fake_order
+        mock_tc.return_value = mock_client
+        executor = AlpacaExecutor()
+        # SHORT INTU @ $378.29, conf 0.57 → half-Kelly 0.07 of $10k = $700 → 1 whole share
+        decision = StockDecision(
+            ticker="INTU", direction=StockDirection.SHORT,
+            confidence=0.57, rationale="Test.", price_at_analysis=378.29,
+        )
+        result = executor.place_order(decision, capital_usd=10000)
+    assert result["status"] == "SUBMITTED"
+    # MarketOrderRequest must be called with qty (int >= 1), NOT notional
+    kwargs = mock_req.call_args.kwargs
+    assert "notional" not in kwargs or kwargs.get("notional") is None, \
+        f"SHORT order must not use notional, got kwargs={kwargs}"
+    assert isinstance(kwargs["qty"], int), f"qty must be int for SHORT, got {type(kwargs['qty'])}"
+    assert kwargs["qty"] >= 1, f"qty must be >= 1, got {kwargs['qty']}"
+
+
+def test_short_order_skipped_when_qty_rounds_to_zero(monkeypatch):
+    """If notional / price < 1 share, SKIP rather than send an invalid order."""
+    monkeypatch.setenv("ALPACA_API_KEY", "fake_key")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "fake_secret")
+    monkeypatch.setenv("ALPACA_PAPER", "true")
+    with patch("tradingagents.exchange.alpaca_executor.TradingClient") as mock_tc:
+        mock_tc.return_value = MagicMock()
+        executor = AlpacaExecutor()
+        # SHORT a $500 stock with only $100 of sizing → 0 whole shares → skip
+        decision = StockDecision(
+            ticker="BRK.A", direction=StockDirection.SHORT,
+            confidence=0.56, rationale="Test.", price_at_analysis=500.0,
+        )
+        result = executor.place_order(decision, capital_usd=1000)
+    assert result["status"] == "SKIPPED"
+    assert "fractional" in result["reason"].lower() or "qty" in result["reason"].lower()
+
+
+def test_long_order_still_uses_notional(monkeypatch):
+    """LONG orders should keep using notional (Alpaca accepts fractional longs)."""
+    monkeypatch.setenv("ALPACA_API_KEY", "fake_key")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "fake_secret")
+    monkeypatch.setenv("ALPACA_PAPER", "true")
+    fake_order = MagicMock(); fake_order.id = "order-long"; fake_order.status = "accepted"
+    with patch("tradingagents.exchange.alpaca_executor.TradingClient") as mock_tc, \
+         patch("tradingagents.exchange.alpaca_executor.MarketOrderRequest") as mock_req:
+        mock_client = MagicMock(); mock_client.submit_order.return_value = fake_order
+        mock_tc.return_value = mock_client
+        executor = AlpacaExecutor()
+        executor.place_order(_long_decision(), capital_usd=10000)
+    kwargs = mock_req.call_args.kwargs
+    assert "notional" in kwargs and kwargs["notional"] > 0, \
+        f"LONG must keep using notional, got kwargs={kwargs}"
+
+
 def test_order_error_returns_error_status(monkeypatch):
     monkeypatch.setenv("ALPACA_API_KEY", "fake_key")
     monkeypatch.setenv("ALPACA_SECRET_KEY", "fake_secret")
