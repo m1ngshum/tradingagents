@@ -6,7 +6,23 @@ updates:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 5
+    # Order matters: a dependency matches the first group it qualifies for.
+    # Security-sensitive packages (LLM SDKs, HTTP clients, trading APIs) get
+    # their own PR so a malicious patch can't ride along with unrelated bumps.
     groups:
+      security-sensitive:
+        patterns:
+          - "anthropic*"
+          - "openai*"
+          - "langchain*"
+          - "langgraph*"
+          - "langsmith*"
+          - "alpaca*"
+          - "httpx*"
+          - "requests*"
+          - "aiohttp*"
+          - "urllib3*"
+          - "exa*"
       python-runtime:
         dependency-type: "production"
         update-types: ["minor", "patch"]
@@ -25,6 +41,7 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
+    open-pull-requests-limit: 5
     groups:
       actions:
         patterns: ["*"]
