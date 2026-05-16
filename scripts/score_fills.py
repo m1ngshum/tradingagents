@@ -27,52 +27,14 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
-from tradingagents.dataflows.polymarket_data import GammaAPIError, get_market_by_id
+from tradingagents.dataflows.polymarket_data import get_market_by_id
 from tradingagents.exchange.io_utils import POLYMARKET_OUTPUT_DIR
 from tradingagents.exchange.scoring import (
     MarketOutcome,
-    classify_outcome,
+    fetch_outcomes,
+    load_jsonl_rows,
     score_position,
 )
-
-
-def _load_fills(date: str | None) -> list[dict]:
-    """Load fills from one date or all dates."""
-    if date:
-        paths = [POLYMARKET_OUTPUT_DIR / f"paper-fills-{date}.jsonl"]
-    else:
-        paths = sorted(POLYMARKET_OUTPUT_DIR.glob("paper-fills-*.jsonl"))
-
-    fills: list[dict] = []
-    for path in paths:
-        if not path.exists():
-            continue
-        with path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    fills.append(json.loads(line))
-    return fills
-
-
-def _fetch_outcomes(market_ids: set[str]) -> dict[str, dict]:
-    """Fetch each market once. Returns {market_id: {outcome, current_yes_price}}."""
-    out: dict[str, dict] = {}
-    for mid in sorted(market_ids):
-        try:
-            m = get_market_by_id(mid)
-        except GammaAPIError as e:
-            print(f"  warn: market {mid} fetch failed: {e}", file=sys.stderr)
-            out[mid] = {"outcome": MarketOutcome.UNKNOWN, "current_yes_price": None}
-            continue
-
-        # Reconstruct outcome_prices from normalised fields. The normalised
-        # market dict in polymarket_data exposes yes_price; no_price = 1 - yes
-        # is implied for binary markets. classify_outcome reads both.
-        prices = [m["yes_price"], 1.0 - m["yes_price"]]
-        outcome, current_yes = classify_outcome(closed=m["closed"], outcome_prices=prices)
-        out[mid] = {"outcome": outcome, "current_yes_price": current_yes}
-    return out
 
 
 def _color(s: str, c: str) -> str:
@@ -96,7 +58,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    fills = _load_fills(args.date)
+    fills = load_jsonl_rows(POLYMARKET_OUTPUT_DIR, date=args.date)
     if not fills:
         target = args.date or "all dates"
         print(f"No fills found for {target}.", file=sys.stderr)
@@ -105,7 +67,7 @@ def main() -> int:
     market_ids = {f["market_id"] for f in fills}
     print(f"Loaded {len(fills)} fills across {len(market_ids)} markets")
     print(f"Fetching current outcomes from gamma-api...")
-    outcomes = _fetch_outcomes(market_ids)
+    outcomes = fetch_outcomes(market_ids, fetch_market=get_market_by_id)
 
     rows = []
     for f in fills:

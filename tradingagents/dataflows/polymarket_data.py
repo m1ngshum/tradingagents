@@ -11,6 +11,7 @@ outcomePrices are filtered out rather than crashing the caller.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 from typing import Any
@@ -123,6 +124,13 @@ def _normalise_market(raw: dict[str, Any]) -> dict[str, Any] | None:
         "closed": bool(raw.get("closed", False)),
         "yes_token_id": yes_token_id,
         "no_token_id": no_token_id,
+        # Fields needed for downstream calibration + cluster cap. Preserved
+        # raw (string form) so callers can re-parse with the same logic that
+        # gamma writes. Defaults are conservative: empty list for statuses,
+        # None for the negRisk grouping ID, raw slug for fallback grouping.
+        "slug": raw.get("slug"),
+        "negRiskRequestID": raw.get("negRiskRequestID") or None,
+        "umaResolutionStatuses": raw.get("umaResolutionStatuses"),
     }
 
 
@@ -260,3 +268,115 @@ def get_order_book(token_id: str) -> dict[str, Any]:
         "asks": _to_levels(raw.get("asks")),
         "timestamp": raw.get("timestamp"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Cluster resolution — groups correlated markets (e.g. "Will Trump say X
+# during Xi event?" sibling markets) so the routine can cap exposure per
+# event. Resolves three ways:
+#   1. `negRiskRequestID` from the market (Polymarket's negRisk sibling ID)
+#   2. `/events?slug=<base-slug>` parent event lookup
+#   3. synthetic `unknown:<base-slug>` so sibling markets with the same base
+#      slug still share a cluster (fail-safe, not fail-open)
+# ---------------------------------------------------------------------------
+
+
+_SAY_STOPWORDS = frozenset({"during", "by", "before", "after", "on", "at", "in", "to"})
+
+
+def _base_slug(slug: str) -> str | None:
+    """Strip the trailing keyword from a market slug.
+
+    Used as the cluster key when negRisk + events lookups both miss. Example:
+        will-trump-say-ai-during-events-with-xi-jinping
+      → will-trump-say-during-events-with-xi-jinping
+
+    The heuristic: find the FIRST "say" token, then drop everything between it
+    and the first stopword that follows. Requires a stopword to exist after the
+    keyword — without one, the slug has no event-context boundary and we
+    refuse to fall back (returning None forces the caller to refuse the BUY,
+    which is the fail-safe per F8 of the PR plan).
+    """
+    if not slug:
+        return None
+    parts = slug.split("-")
+    if "say" not in parts:
+        return None
+    i = parts.index("say")
+    # Find first stopword strictly after "say".
+    j = i + 1
+    while j < len(parts) and parts[j] not in _SAY_STOPWORDS:
+        j += 1
+    # No stopword reached → slug has no event-context anchor; refuse fallback.
+    if j == len(parts):
+        return None
+    # No keyword between "say" and the stopword → slug already in base form.
+    if j == i + 1:
+        return slug
+    return "-".join(parts[:i + 1] + parts[j:])
+
+
+@functools.lru_cache(maxsize=512)
+def _events_lookup_cached(slug: str) -> str | None:
+    """Cached `/events?slug=<slug>` lookup. Returns event_id or None.
+
+    Cached per-process so duplicate slugs across the loop (or across
+    discover + run_polymarket in the same fire) share one HTTP call.
+    Cache is unbounded by slug count in practice — Polymarket has < 10k
+    open events at any time.
+    """
+    try:
+        resp = _http_get_with_retry(
+            f"{GAMMA_BASE}/events",
+            timeout=DEFAULT_TIMEOUT,
+            params={"slug": slug, "limit": 1},
+        )
+        events = resp.json()
+        if isinstance(events, list) and events:
+            return events[0].get("id") or None
+    except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as e:
+        logger.warning(
+            "events lookup failed for slug %s: %s — falling back to synthetic",
+            slug, e,
+        )
+    return None
+
+
+def resolve_cluster_id(
+    market: dict[str, Any],
+    *,
+    allow_events_lookup: bool = True,
+) -> str | None:
+    """Resolve a market's cluster ID for per-event exposure caps.
+
+    Resolution order:
+      1. `negRiskRequestID` on the market itself — Polymarket's native sibling
+         ID. Cheapest and most authoritative.
+      2. `/events?slug=<base-slug>` — find the parent event whose markets list
+         includes this one. Costs one extra HTTP call per unique slug-base
+         (LRU-cached per process).
+         Skipped when `allow_events_lookup=False` (test path or cost-sensitive
+         caller).
+      3. Synthetic `unknown:<base-slug>` — sibling markets with the same base
+         slug share a cluster even when Gamma exposes no link. Fail-safe.
+
+    Returns the cluster ID string, or None if no fallback can be derived
+    (slug is unrecognisable) — the caller should refuse the BUY in that case.
+    """
+    neg_risk_id = market.get("negRiskRequestID")
+    if neg_risk_id:
+        return f"negRisk:{neg_risk_id}"
+
+    slug = market.get("slug") or ""
+
+    if allow_events_lookup and slug:
+        event_id = _events_lookup_cached(slug)
+        if event_id:
+            return f"event:{event_id}"
+
+    base = _base_slug(slug)
+    if base:
+        return f"unknown:{base}"
+
+    # Cannot derive any grouping — caller should refuse the BUY.
+    return None

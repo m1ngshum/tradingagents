@@ -25,14 +25,18 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
+from collections import Counter
+
 from tradingagents.dataflows.market_classifier import classify_market
 from tradingagents.dataflows.polymarket_data import (
     CLOBAPIError,
     GammaAPIError,
     get_open_markets,
     get_order_book,
+    resolve_cluster_id,
 )
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.exchange.cost_tracker import CostTracker
 from tradingagents.exchange.io_utils import POLYMARKET_OUTPUT_DIR, append_jsonl
 from tradingagents.exchange.paper_fill import is_economic_when_correct, simulate_fill
 from tradingagents.exchange.polymarket_executor import (
@@ -115,6 +119,30 @@ def main() -> int:
             "see docs/PLAN-research-capture-and-cluster-cap.md). Pass 0.0 to disable."
         ),
     )
+    parser.add_argument(
+        "--daily-budget-usd",
+        type=float,
+        default=float(os.environ.get("TRADINGAGENTS_POLYMARKET_DAILY_BUDGET_USD", "15.0")),
+        help=(
+            "Hard ceiling on today's LLM spend for this routine. When today's "
+            "decisions-*.jsonl sums to >= this value, further markets are "
+            "SKIPPED with reason 'daily_budget_exceeded' and the routine "
+            "completes gracefully (state still pushed). Default $15 "
+            "(env: TRADINGAGENTS_POLYMARKET_DAILY_BUDGET_USD). Pass 0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "--max-per-cluster",
+        type=int,
+        default=1,
+        help=(
+            "Maximum BUY positions to take in any single cluster (Polymarket "
+            "negRisk sibling group OR shared event). Default 1 (most "
+            "conservative — addresses the 2026-05-14 Trump-Xi 7-of-7 trap). "
+            "Pass 0 to disable. Skipped trades are logged with reason "
+            "'cluster_full' or 'cluster_unknown' to paper-fills-*.jsonl."
+        ),
+    )
     parser.add_argument("--quiet", action="store_true", help="Print only the JSONL path")
     parser.add_argument(
         "--live",
@@ -144,6 +172,16 @@ def main() -> int:
         parser.error(
             f"--min-confidence must be a finite number in [0.0, 1.0], "
             f"got {args.min_confidence}"
+        )
+    # Same finite-check on --daily-budget-usd. NaN would let unlimited spend
+    # through silently; negative / inf are nonsensical.
+    if (
+        not math.isfinite(args.daily_budget_usd)
+        or args.daily_budget_usd < 0
+    ):
+        parser.error(
+            f"--daily-budget-usd must be a finite non-negative number, "
+            f"got {args.daily_budget_usd}"
         )
 
     if not os.environ.get("EXA_API_KEY"):
@@ -238,6 +276,15 @@ def main() -> int:
     now = datetime.now(timezone.utc)
     log_path = _decision_log_path(now)
     fill_log_path = _fill_log_path(now)
+    cost_tracker = CostTracker(decision_log_path=log_path, budget_usd=args.daily_budget_usd)
+
+    # Seed in-process cluster counts ONCE from today's existing fills, then
+    # increment in lockstep with new placed fills. Avoids per-market disk
+    # re-scan inside the loop. See PR #18 review (efficiency H1).
+    from tradingagents.exchange.scoring import count_fills_by_cluster
+    cluster_counts = Counter(
+        count_fills_by_cluster(POLYMARKET_OUTPUT_DIR, date=now.strftime("%Y-%m-%d"))
+    )
 
     if not args.quiet:
         print(f"=== Analysing {len(markets)} markets with model={args.model} ===")
@@ -251,9 +298,72 @@ def main() -> int:
 
     for i, m in enumerate(markets, start=1):
         question = m.get("question") or "(no question)"
+
+        def _skip_fill(reason: str, extra: dict | None = None) -> None:
+            """Write a SKIPPED row to the fill JSONL with consistent base fields.
+
+            All fill-time skips share these base fields so the audit-trail schema
+            stays consistent. Per-reason fields are added via `extra`.
+            """
+            payload = {
+                "ts": now.isoformat(),
+                "market_id": m["id"],
+                "question": question,
+                "status": "SKIPPED",
+                "reason": reason,
+                "slug": m.get("slug"),
+                **(extra or {}),
+            }
+            append_jsonl(fill_log_path, payload)
         if not args.quiet:
             print(f"--- [{i}/{len(markets)}] {question[:80]}")
             print(f"    yes_price={m['yes_price']:.3f}  end={m.get('end_date')}")
+
+        # Pre-flight gate 1: daily LLM budget. Must fire BEFORE the LLM call.
+        if cost_tracker.is_exhausted():
+            status = cost_tracker.status()
+            skip_payload = {
+                "ts": now.isoformat(),
+                "model": args.model,
+                "market_id": m["id"],
+                "question": question,
+                "direction": "SKIPPED",
+                "reason": "daily_budget_exceeded",
+                "spent_today_usd": status["spent_today_usd"],
+                "budget_usd": status["budget_usd"],
+            }
+            append_jsonl(log_path, skip_payload)
+            if not args.quiet:
+                print(
+                    f"    SKIP — daily_budget_exceeded "
+                    f"(spent ${status['spent_today_usd']:.2f} / ${status['budget_usd']:.2f})\n"
+                )
+            continue
+
+        # Pre-flight gate 2: cluster cap. Fires BEFORE the LLM call so we
+        # don't waste budget analysing a market we cannot trade anyway. The
+        # 7-of-7 Trump-Xi loop would have called the LLM 7 times before;
+        # now it calls 1, saves ~$0.20/cluster at current Sonnet pricing.
+        # See PR #18 review (quality H1).
+        cluster_id: str | None = None
+        if args.max_per_cluster > 0:
+            cluster_id = resolve_cluster_id(m)
+            if cluster_id is None:
+                _skip_fill("cluster_unknown")
+                if not args.quiet:
+                    print(f"    fill: SKIP — cluster_unknown (cannot group market safely)\n")
+                continue
+            if cluster_counts.get(cluster_id, 0) >= args.max_per_cluster:
+                _skip_fill("cluster_full", {
+                    "cluster_id": cluster_id,
+                    "max_per_cluster": args.max_per_cluster,
+                })
+                if not args.quiet:
+                    print(
+                        f"    fill: SKIP — cluster_full "
+                        f"({cluster_counts[cluster_id]}/{args.max_per_cluster} in cluster {cluster_id})\n"
+                    )
+                continue
 
         def _on_step(label: str) -> None:
             if not args.quiet:
@@ -278,35 +388,33 @@ def main() -> int:
             **decision.model_dump(mode="json"),
         }
         append_jsonl(log_path, payload)
+        # Update the in-process cost cache so the next iteration's
+        # is_exhausted() check sees this decision's spend.
+        cost_tracker.record(getattr(decision, "cost_usd", None) or payload.get("cost_usd"))
 
         if not args.quiet:
             print(f"    -> {decision.direction.value} (conf {decision.confidence:.2f})")
             print(f"       {decision.rationale[:200]}")
 
-        # Fill: live order (--live) or paper simulation (default). Skip HOLD / --no-fill.
+        # Post-LLM gates fire when direction-or-confidence info is needed.
+
+        # Skip HOLD / --no-fill outright (no fill row written — HOLD is its
+        # own decision, the decision log already captured it).
         if args.no_fill or decision.direction.value == "HOLD":
             if not args.quiet:
                 print()
             continue
 
-        # Confidence gate. Calibration: conf<0.85 wins ~33% on n=15;
-        # conf>=0.9 wins 100% on n=2. The gate keeps the routine running but
-        # suppresses low-conviction fills. Logs a SKIPPED row to the fill JSONL
-        # so the audit trail is complete — the decision file shows what the
-        # bot decided, the fill file shows what actually executed (or didn't).
+        # Gate 3: confidence. Calibration showed conf<0.85 wins ~33%
+        # vs 100% at conf>=0.9 (n=17). Suppresses low-conviction fills.
         if decision.confidence < args.min_confidence:
-            skip_payload = {
-                "ts": now.isoformat(),
-                "market_id": m["id"],
-                "question": question,
+            _skip_fill("below_min_confidence", {
                 "direction": decision.direction.value,
                 "confidence": decision.confidence,
                 "yes_price_at_analysis": decision.yes_price_at_analysis,
-                "status": "SKIPPED",
-                "reason": "below_min_confidence",
                 "min_confidence": args.min_confidence,
-            }
-            append_jsonl(fill_log_path, skip_payload)
+                "cluster_id": cluster_id,
+            })
             if not args.quiet:
                 print(
                     f"    fill: SKIP — confidence {decision.confidence:.2f} "
@@ -316,6 +424,10 @@ def main() -> int:
 
         token_id = m.get("yes_token_id") if decision.direction.value == "BUY_YES" else m.get("no_token_id")
         if not token_id:
+            _skip_fill("no_token_id", {
+                "direction": decision.direction.value,
+                "cluster_id": cluster_id,
+            })
             if not args.quiet:
                 print(f"    fill: SKIP — no token id available\n")
             continue
@@ -330,10 +442,15 @@ def main() -> int:
                 "direction": decision.direction.value,
                 "yes_price_at_analysis": decision.yes_price_at_analysis,
                 "capital_usd": args.capital,
+                "cluster_id": cluster_id,
                 "live": True,
                 **result,
             }
             append_jsonl(fill_log_path, fill_payload)
+            # Update in-process cluster cache so subsequent iterations see
+            # this position. Only count actually-SUBMITTED orders, not errors.
+            if cluster_id and result.get("status") == "SUBMITTED":
+                cluster_counts[cluster_id] += 1
             if not args.quiet:
                 if result["status"] == "SUBMITTED":
                     print(
@@ -377,9 +494,13 @@ def main() -> int:
             "direction": decision.direction.value,
             "yes_price_at_analysis": decision.yes_price_at_analysis,
             "budget_usd": args.budget,
+            "cluster_id": cluster_id,
             **fill,
         }
         append_jsonl(fill_log_path, fill_payload)
+        # Update in-process cluster cache for next iteration's cap check.
+        if cluster_id and fill.get("filled"):
+            cluster_counts[cluster_id] += 1
 
         if not args.quiet:
             if fill["filled"]:
