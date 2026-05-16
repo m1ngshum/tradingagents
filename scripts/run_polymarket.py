@@ -103,6 +103,17 @@ def main() -> int:
             "commodity_price, weather, celebrity_move, short_term_price, other."
         ),
     )
+    parser.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.0,
+        help=(
+            "Skip filling BUY_YES/BUY_NO decisions below this confidence. "
+            "Decision is still logged with reason 'below_min_confidence' for audit. "
+            "Default 0.0 disables the gate. Calibration analysis showed conf<0.85 "
+            "wins ~33%% vs 100%% at conf>=0.9 (n=17, see docs/PLAN-research-capture-and-cluster-cap.md)."
+        ),
+    )
     parser.add_argument("--quiet", action="store_true", help="Print only the JSONL path")
     parser.add_argument(
         "--live",
@@ -262,6 +273,17 @@ def main() -> int:
         if args.no_fill or decision.direction.value == "HOLD":
             if not args.quiet:
                 print()
+            continue
+
+        # Confidence gate: calibration showed conf<0.85 wins ~33% across all bands;
+        # conf>=0.9 wins 100% on the small sample (n=2). The gate keeps the routine
+        # running but suppresses low-conviction fills.
+        if decision.confidence < args.min_confidence:
+            if not args.quiet:
+                print(
+                    f"    fill: SKIP — confidence {decision.confidence:.2f} "
+                    f"< --min-confidence {args.min_confidence}\n"
+                )
             continue
 
         token_id = m.get("yes_token_id") if decision.direction.value == "BUY_YES" else m.get("no_token_id")
