@@ -47,6 +47,17 @@ class TestClassifyMarket:
         ("Will Karrigan retire by June 30?", "celebrity_move", "bad"),
         ("Will Trump visit Pakistan by May 31?", "celebrity_move", "bad"),
         ("Trump renames ICE to NICE by June 30?", "celebrity_move", "bad"),
+
+        # Speech-keyword markets → BAD (added after 7/7 loss cluster on Trump-Xi)
+        ('Will Trump say "AI" or "Artificial Intelligence" during events with Xi Jinping?', "speech_keyword", "bad"),
+        ('Will Trump say "Crypto" or "Bitcoin" during events with Xi Jinping?', "speech_keyword", "bad"),
+        ('Will Trump say "Farmer" during events with Xi Jinping?', "speech_keyword", "bad"),
+        ('Will Trump say "Rare earth" during events with Xi Jinping?', "speech_keyword", "bad"),
+        ('Will Trump say "Hong Kong" during events with Xi Jinping?', "speech_keyword", "bad"),
+        ('Will Trump say "Iran" during events with Xi Jinping?', "speech_keyword", "bad"),
+        ('Will Trump say "Tough Negotiator" during events with Xi Jinping?', "speech_keyword", "bad"),
+        ('Will Trump say "Taiwan" or "Tibet" during events with Xi Jinping?', "speech_keyword", "bad"),
+        ('Will Biden say "inflation" during the State of the Union?', "speech_keyword", "bad"),
     ])
     def test_bad_fit_categorization(self, question, expected_category, expected_fit):
         cls = classify_market(question)
