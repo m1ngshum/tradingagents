@@ -23,11 +23,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import statistics
 import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import TextIO
+
+
+_MODEL_VERSION_DASH_RE = re.compile(r"(\d)-(\d)")
+
+
+def _normalize_model(model: str) -> str:
+    """Collapse dash-between-digits to dot so model ids group correctly.
+
+    Routine prompts have written both `anthropic/claude-sonnet-4.6` and
+    `anthropic/claude-sonnet-4-6` to the decision log over time. Without
+    normalization the report splits the same model across two rows.
+    """
+    return _MODEL_VERSION_DASH_RE.sub(r"\1.\2", model)
 
 from dotenv import load_dotenv
 
@@ -247,7 +261,8 @@ def main() -> int:
     by_model: dict[str, list] = defaultdict(list)
     for f in resolved:
         # Fill rows don't always carry model; fall back to "unknown"
-        by_model[f.get("model") or "unknown"].append(f)
+        model_id = f.get("model") or "unknown"
+        by_model[_normalize_model(model_id)].append(f)
     if len(by_model) > 1:
         _print(out, f"")
         _print(out, f"## By model")
