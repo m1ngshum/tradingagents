@@ -117,3 +117,43 @@ def test_output_path_in_tmp_accepted(tmp_path: Path):
     finally:
         if out_file.exists():
             out_file.unlink()
+
+
+# ---------------------------------------------------------------------------
+# Model-name normalization (groups dash-vs-dot version variants)
+# ---------------------------------------------------------------------------
+
+
+def _load_normalize():
+    """Import the script's _normalize_model without re-running its __main__."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("calibrate_mod", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod._normalize_model
+
+
+def test_normalize_model_collapses_dash_between_digits():
+    """The 2026-05-17 calibration report split 'sonnet-4.6' (n=16, 25% win)
+    from 'sonnet-4-6' (n=3, 100% win) as two models — same model, dash
+    vs dot in version segment. Normalization must collapse them."""
+    norm = _load_normalize()
+    assert norm("anthropic/claude-sonnet-4-6") == "anthropic/claude-sonnet-4.6"
+    assert norm("anthropic/claude-sonnet-4.6") == "anthropic/claude-sonnet-4.6"
+    assert norm("anthropic/claude-opus-4-7") == "anthropic/claude-opus-4.7"
+
+
+def test_normalize_model_preserves_non_version_dashes():
+    """Dashes that aren't between digits (provider prefix, model family
+    names like 'gpt-4o') must be preserved."""
+    norm = _load_normalize()
+    assert norm("openai/gpt-4o") == "openai/gpt-4o"
+    assert norm("openai/gpt-4o-mini") == "openai/gpt-4o-mini"
+    assert norm("anthropic/claude-haiku-4.5") == "anthropic/claude-haiku-4.5"
+
+
+def test_normalize_model_handles_unknown_and_empty():
+    """Defensive: unknown/empty values from missing model fields."""
+    norm = _load_normalize()
+    assert norm("unknown") == "unknown"
+    assert norm("") == ""

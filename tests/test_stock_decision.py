@@ -89,3 +89,53 @@ def test_propagate_stock_returns_decision_with_news():
             _, decision = graph.propagate_stock("AAPL", price=185.0)
     assert isinstance(decision, StockDecision)
     assert decision.ticker == "AAPL"
+
+
+def _capture_trader_prompt() -> str:
+    """Run propagate_stock against mocks and return the trader prompt that
+    was passed to structured_llm.invoke. Used by prompt-structure tests."""
+    graph = _mock_graph()
+    fake_news = [{"title": "x", "text": "y", "published_date": "2026-05-10"}]
+    fake_decision = StockDecision(
+        ticker="AAPL", direction=StockDirection.HOLD,
+        confidence=0.6, rationale="ok", price_at_analysis=185.0,
+    )
+    bull_update = {"investment_debate_state": {"bull_history": "B", "bear_history": "", "history": "", "current_response": "", "judge_decision": "", "count": 1}}
+    bear_update = {"investment_debate_state": {"bull_history": "B", "bear_history": "BR", "history": "", "current_response": "", "judge_decision": "", "count": 2}}
+    with patch("tradingagents.dataflows.polymarket_news.search_event_news", return_value=fake_news), \
+         patch("yfinance.Ticker") as mock_yf:
+        mock_yf.return_value.history.return_value = MagicMock(empty=True)
+        bull_node = MagicMock(return_value=bull_update)
+        bear_node = MagicMock(return_value=bear_update)
+        structured_llm = MagicMock()
+        structured_llm.invoke.return_value = fake_decision
+        with patch("tradingagents.agents.researchers.bull_researcher.create_bull_researcher", return_value=bull_node), \
+             patch("tradingagents.agents.researchers.bear_researcher.create_bear_researcher", return_value=bear_node):
+            graph.quick_thinking_llm = MagicMock()
+            graph.quick_thinking_llm.with_structured_output.return_value = structured_llm
+            graph.propagate_stock("AAPL", price=185.0)
+    return structured_llm.invoke.call_args[0][0]
+
+
+def test_stock_trader_prompt_drops_confidence_anchor():
+    """Regression: the old prompt had a numeric ladder ('0.48-0.52', '0.53-0.59')
+    that pinned sonnet to HOLD@0.54 across all stocks (4/5 of 2026-05-15 fire).
+    The new prompt must not reintroduce explicit confidence bands."""
+    prompt = _capture_trader_prompt()
+    for banned in ("0.48-0.52", "0.53-0.59", "0.60-0.69", "0.70+"):
+        assert banned not in prompt, (
+            f"prompt still contains anchor band {banned!r} — "
+            f"sonnet will lock onto the middle of the lowest band"
+        )
+
+
+def test_stock_trader_prompt_has_default_to_hold_framing():
+    """The new framing mirrors propagate_market: DEFAULT TO HOLD with a
+    concrete-catalyst test, not a numeric ladder."""
+    prompt = _capture_trader_prompt()
+    assert "DEFAULT TO HOLD" in prompt
+    assert "catalyst" in prompt.lower()
+    # Honest-confidence guidance (no number-from-band picking)
+    assert "high evidence" in prompt.lower()
+    # Short-side base-rate caution (asymmetric loss on shorts)
+    assert "SHORTING" in prompt or "SHORTS" in prompt
