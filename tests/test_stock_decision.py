@@ -91,9 +91,11 @@ def test_propagate_stock_returns_decision_with_news():
     assert decision.ticker == "AAPL"
 
 
-def _capture_trader_prompt() -> str:
-    """Run propagate_stock against mocks and return the trader prompt that
-    was passed to structured_llm.invoke. Used by prompt-structure tests."""
+@pytest.fixture(scope="module")
+def trader_prompt() -> str:
+    """Run propagate_stock against mocks once per module, return the prompt
+    that was passed to structured_llm.invoke. Shared by the assertion tests
+    below so we don't re-execute the full bull/bear pipeline per test."""
     graph = _mock_graph()
     fake_news = [{"title": "x", "text": "y", "published_date": "2026-05-10"}]
     fake_decision = StockDecision(
@@ -117,25 +119,23 @@ def _capture_trader_prompt() -> str:
     return structured_llm.invoke.call_args[0][0]
 
 
-def test_stock_trader_prompt_drops_confidence_anchor():
+def test_stock_trader_prompt_drops_confidence_anchor(trader_prompt: str):
     """Regression: the old prompt had a numeric ladder ('0.48-0.52', '0.53-0.59')
     that pinned sonnet to HOLD@0.54 across all stocks (4/5 of 2026-05-15 fire).
     The new prompt must not reintroduce explicit confidence bands."""
-    prompt = _capture_trader_prompt()
     for banned in ("0.48-0.52", "0.53-0.59", "0.60-0.69", "0.70+"):
-        assert banned not in prompt, (
+        assert banned not in trader_prompt, (
             f"prompt still contains anchor band {banned!r} — "
             f"sonnet will lock onto the middle of the lowest band"
         )
 
 
-def test_stock_trader_prompt_has_default_to_hold_framing():
+def test_stock_trader_prompt_has_default_to_hold_framing(trader_prompt: str):
     """The new framing mirrors propagate_market: DEFAULT TO HOLD with a
     concrete-catalyst test, not a numeric ladder."""
-    prompt = _capture_trader_prompt()
-    assert "DEFAULT TO HOLD" in prompt
-    assert "catalyst" in prompt.lower()
+    assert "DEFAULT TO HOLD" in trader_prompt
+    assert "catalyst" in trader_prompt.lower()
     # Honest-confidence guidance (no number-from-band picking)
-    assert "high evidence" in prompt.lower()
+    assert "high evidence" in trader_prompt.lower()
     # Short-side base-rate caution (asymmetric loss on shorts)
-    assert "SHORTING" in prompt or "SHORTS" in prompt
+    assert "SHORTING" in trader_prompt or "SHORTS" in trader_prompt
