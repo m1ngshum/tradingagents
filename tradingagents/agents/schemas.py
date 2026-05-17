@@ -275,6 +275,14 @@ class PolymarketDecision(BaseModel):
         description="Polling cycle timestamp bucket. Used as part of the LangGraph thread id "
         "to prevent checkpoint collisions across cycles."
     )
+    # Runtime-observed, not LLM-supplied. propagate_market overrides any value
+    # the model fills in with the accumulator's actual figure before returning.
+    cost_usd: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Computed by the runtime from accumulated token usage across all LLM "
+        "calls for this decision. Do not estimate or fill in.",
+    )
 
 
 # ---------------------------------------------------------------------------

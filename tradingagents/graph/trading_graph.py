@@ -294,9 +294,16 @@ class TradingAgentsGraph:
         from tradingagents.agents.researchers.bear_researcher import create_bear_researcher
         from tradingagents.agents.schemas import PolymarketDecision, PolymarketDirection
         from tradingagents.exchange import rate_limiter
+        from tradingagents.exchange.cost_tracker import TokenAccumulator
 
         cycle_ts = int(time.time() // poll_interval_seconds)
         thread_label = f"{market_id}_{cycle_ts}"
+
+        # Sums tokens across bull/bear/trader so CostTracker.record() can gate
+        # the next iteration. Bound via with_config so all 3 LLM calls share it.
+        cost_acc = TokenAccumulator()
+        quick_llm = self.quick_thinking_llm.with_config(callbacks=[cost_acc])
+        model_name = self.config.get("quick_think_llm")
 
         def _step(label: str) -> None:
             if on_step is not None:
@@ -387,8 +394,8 @@ class TradingAgentsGraph:
 
         # Step 3: Bull, then bear debate (one round each, Phase A keeps it short).
         # Immutable updates per project coding-style: rebuild pm_state with spread.
-        bull_node = create_bull_researcher(self.quick_thinking_llm)
-        bear_node = create_bear_researcher(self.quick_thinking_llm)
+        bull_node = create_bull_researcher(quick_llm)
+        bear_node = create_bear_researcher(quick_llm)
         _step("bull researcher")
         bull_update = bull_node(pm_state)
         pm_state = {
@@ -485,7 +492,7 @@ class TradingAgentsGraph:
 
         _step("trader synthesis")
         try:
-            structured_llm = self.quick_thinking_llm.with_structured_output(PolymarketDecision)
+            structured_llm = quick_llm.with_structured_output(PolymarketDecision)
             partial = structured_llm.invoke(trader_prompt)
             # The LLM may not echo immutable fields exactly. Override them with
             # the inputs we know are correct so the contract is honored.
@@ -497,6 +504,7 @@ class TradingAgentsGraph:
                 rationale=partial.rationale,
                 yes_price_at_analysis=yes_price,
                 cycle_ts=cycle_ts,
+                cost_usd=cost_acc.total_cost_usd(model_name),
             )
         except Exception as e:  # noqa: BLE001  Phase A: any failure -> HOLD
             logger.warning("propagate_market trader step failed: %s", e)
@@ -508,6 +516,7 @@ class TradingAgentsGraph:
                 rationale=f"Trader synthesis failed: {type(e).__name__}",
                 yes_price_at_analysis=yes_price,
                 cycle_ts=cycle_ts,
+                cost_usd=cost_acc.total_cost_usd(model_name),
             )
 
         return (pm_state, decision)
