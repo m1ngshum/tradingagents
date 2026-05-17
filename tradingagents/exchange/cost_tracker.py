@@ -23,10 +23,84 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 from tradingagents.exchange.scoring import load_jsonl_rows
 
 logger = logging.getLogger(__name__)
+
+
+# Per-model USD pricing (per 1M tokens, (input, output)). When a model isn't
+# listed we fall back to sonnet pricing so the ceiling errs on the safe side.
+# Update as Anthropic/OpenAI/OpenRouter pricing shifts.
+_MODEL_PRICING_USD_PER_MTOK: dict[str, tuple[float, float]] = {
+    "anthropic/claude-sonnet-4.7": (3.0, 15.0),
+    "anthropic/claude-sonnet-4.6": (3.0, 15.0),
+    "anthropic/claude-sonnet-4.5": (3.0, 15.0),
+    "anthropic/claude-sonnet-4": (3.0, 15.0),
+    "anthropic/claude-opus-4.7": (15.0, 75.0),
+    "anthropic/claude-opus-4.6": (15.0, 75.0),
+    "anthropic/claude-opus-4.5": (15.0, 75.0),
+    "anthropic/claude-haiku-4.5": (1.0, 5.0),
+    "openai/gpt-4.1": (2.5, 10.0),
+    "openai/gpt-4o": (2.5, 10.0),
+    "openai/gpt-4o-mini": (0.15, 0.6),
+}
+_DEFAULT_PRICING_USD_PER_MTOK = (3.0, 15.0)
+
+
+def estimate_llm_cost(
+    model: str | None,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> float:
+    """Estimate USD cost from token usage. Falls back to sonnet pricing when
+    the model isn't in the table, so unknown models over-report rather than
+    under-report against the budget.
+    """
+    if prompt_tokens < 0 or completion_tokens < 0:
+        return 0.0
+    in_rate, out_rate = _MODEL_PRICING_USD_PER_MTOK.get(
+        model or "", _DEFAULT_PRICING_USD_PER_MTOK
+    )
+    return (prompt_tokens * in_rate + completion_tokens * out_rate) / 1_000_000
+
+
+class TokenAccumulator:
+    """LangChain callback that sums prompt+completion tokens across LLM calls.
+
+    Bound once via `llm.with_config(callbacks=[accumulator])` and reused across
+    bull/bear/trader synthesis within a single propagate_market invocation.
+    Read `.total_cost_usd(model)` after all calls complete.
+
+    Resilient by design: if a provider doesn't emit token_usage, the
+    accumulator stays at 0 rather than raising — the cost gate still works,
+    it just under-reports for that call.
+    """
+
+    def __init__(self) -> None:
+        self.prompt_tokens: int = 0
+        self.completion_tokens: int = 0
+
+    def on_llm_end(self, response: Any, **kwargs: Any) -> None:  # noqa: ANN401
+        llm_output = getattr(response, "llm_output", None) or {}
+        usage = llm_output.get("token_usage") or llm_output.get("usage") or {}
+        self.prompt_tokens += int(
+            usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+        )
+        self.completion_tokens += int(
+            usage.get("completion_tokens") or usage.get("output_tokens") or 0
+        )
+
+    # Stub the rest of the BaseCallbackHandler surface so langchain accepts
+    # this object without us importing BaseCallbackHandler at module load.
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401
+        if name.startswith("on_"):
+            return lambda *a, **kw: None
+        raise AttributeError(name)
+
+    def total_cost_usd(self, model: str | None) -> float:
+        return estimate_llm_cost(model, self.prompt_tokens, self.completion_tokens)
 
 
 class CostTracker:

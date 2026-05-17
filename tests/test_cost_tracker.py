@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import pytest
 from pathlib import Path
+from types import SimpleNamespace
 
-from tradingagents.exchange.cost_tracker import CostTracker
+from tradingagents.exchange.cost_tracker import (
+    CostTracker,
+    TokenAccumulator,
+    estimate_llm_cost,
+)
 from tradingagents.exchange.io_utils import append_jsonl
 
 
@@ -114,3 +119,82 @@ def test_record_triggers_initial_load_if_needed(tmp_path: Path):
     ct = CostTracker(decision_log_path=log, budget_usd=1.0)
     ct.record(0.20)  # before any spent_today() call
     assert ct.spent_today() == pytest.approx(0.30)
+
+
+# ---------------------------------------------------------------------------
+# Token accumulator + cost estimator (wire-up for the budget gate)
+# ---------------------------------------------------------------------------
+
+
+def test_estimate_llm_cost_known_model():
+    # sonnet pricing: $3/MTok in, $15/MTok out
+    # 1000 in + 500 out = 0.003 + 0.0075 = 0.0105
+    assert estimate_llm_cost("anthropic/claude-sonnet-4.6", 1000, 500) == pytest.approx(0.0105)
+
+
+def test_estimate_llm_cost_unknown_model_falls_back_to_sonnet():
+    """Unknown models should over-report (safe side) using sonnet pricing,
+    so the daily budget gate fires earlier rather than later for new models."""
+    known = estimate_llm_cost("anthropic/claude-sonnet-4.6", 1000, 500)
+    unknown = estimate_llm_cost("some-future-model", 1000, 500)
+    assert known == unknown
+
+
+def test_estimate_llm_cost_zero_tokens():
+    assert estimate_llm_cost("anthropic/claude-sonnet-4.6", 0, 0) == 0.0
+
+
+def test_estimate_llm_cost_negative_tokens_returns_zero():
+    """Defensive: negative token counts shouldn't produce negative cost."""
+    assert estimate_llm_cost("anthropic/claude-sonnet-4.6", -100, 500) == 0.0
+
+
+def _fake_llm_response(prompt_tokens: int, completion_tokens: int):
+    """Mimics langchain LLMResult.llm_output shape that ChatOpenAI emits."""
+    return SimpleNamespace(
+        llm_output={
+            "token_usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            }
+        }
+    )
+
+
+def test_token_accumulator_sums_across_calls():
+    acc = TokenAccumulator()
+    acc.on_llm_end(_fake_llm_response(100, 50))
+    acc.on_llm_end(_fake_llm_response(200, 75))
+    acc.on_llm_end(_fake_llm_response(300, 25))
+    assert acc.prompt_tokens == 600
+    assert acc.completion_tokens == 150
+    # 600 * 3 + 150 * 15 = 1800 + 2250 = 4050 µUSD = 0.004050
+    assert acc.total_cost_usd("anthropic/claude-sonnet-4.6") == pytest.approx(0.00405)
+
+
+def test_token_accumulator_handles_missing_usage():
+    """Some adapters don't emit token_usage; the accumulator must not crash."""
+    acc = TokenAccumulator()
+    acc.on_llm_end(SimpleNamespace(llm_output=None))
+    acc.on_llm_end(SimpleNamespace(llm_output={}))
+    acc.on_llm_end(SimpleNamespace(llm_output={"token_usage": {}}))
+    assert acc.total_cost_usd("anthropic/claude-sonnet-4.6") == 0.0
+
+
+def test_token_accumulator_handles_alt_field_names():
+    """Some adapters (Anthropic-native) use input_tokens/output_tokens."""
+    acc = TokenAccumulator()
+    acc.on_llm_end(SimpleNamespace(
+        llm_output={"usage": {"input_tokens": 100, "output_tokens": 50}}
+    ))
+    assert acc.prompt_tokens == 100
+    assert acc.completion_tokens == 50
+
+
+def test_token_accumulator_is_callback_compatible():
+    """LangChain may probe other on_* methods; our stub must not raise."""
+    acc = TokenAccumulator()
+    acc.on_llm_start({}, [])  # should be a no-op
+    acc.on_chain_start({}, {})  # should be a no-op
+    acc.on_tool_end("result")  # should be a no-op
+    assert acc.prompt_tokens == 0
