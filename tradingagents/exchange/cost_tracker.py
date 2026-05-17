@@ -25,6 +25,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from langchain_core.callbacks import BaseCallbackHandler
+
 from tradingagents.exchange.scoring import load_jsonl_rows
 
 logger = logging.getLogger(__name__)
@@ -66,7 +68,7 @@ def estimate_llm_cost(
     return (prompt_tokens * in_rate + completion_tokens * out_rate) / 1_000_000
 
 
-class TokenAccumulator:
+class TokenAccumulator(BaseCallbackHandler):
     """LangChain callback that sums prompt+completion tokens across LLM calls.
 
     Bound once via `llm.with_config(callbacks=[accumulator])` and reused across
@@ -79,6 +81,7 @@ class TokenAccumulator:
     """
 
     def __init__(self) -> None:
+        super().__init__()
         self.prompt_tokens: int = 0
         self.completion_tokens: int = 0
 
@@ -91,13 +94,6 @@ class TokenAccumulator:
         self.completion_tokens += int(
             usage.get("completion_tokens") or usage.get("output_tokens") or 0
         )
-
-    # Stub the rest of the BaseCallbackHandler surface so langchain accepts
-    # this object without us importing BaseCallbackHandler at module load.
-    def __getattr__(self, name: str) -> Any:  # noqa: ANN401
-        if name.startswith("on_"):
-            return lambda *a, **kw: None
-        raise AttributeError(name)
 
     def total_cost_usd(self, model: str | None) -> float:
         return estimate_llm_cost(model, self.prompt_tokens, self.completion_tokens)

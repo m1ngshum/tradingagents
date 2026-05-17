@@ -192,9 +192,19 @@ def test_token_accumulator_handles_alt_field_names():
 
 
 def test_token_accumulator_is_callback_compatible():
-    """LangChain may probe other on_* methods; our stub must not raise."""
+    """LangChain probes framework attrs (raise_error, ignore_*) during
+    dispatch. Inheriting from BaseCallbackHandler gives us no-op defaults.
+    Regression: a prior version stubbed only on_* via __getattr__ and
+    crashed when langchain looked up handler.raise_error."""
+    from langchain_core.callbacks import BaseCallbackHandler
+
     acc = TokenAccumulator()
-    acc.on_llm_start({}, [])  # should be a no-op
-    acc.on_chain_start({}, {})  # should be a no-op
-    acc.on_tool_end("result")  # should be a no-op
-    assert acc.prompt_tokens == 0
+    assert isinstance(acc, BaseCallbackHandler)
+    # The framework attrs that bit us before — these MUST resolve to falsy
+    # defaults, not raise AttributeError.
+    assert acc.raise_error is False
+    assert acc.ignore_llm is False
+    assert acc.ignore_chain is False
+    assert acc.ignore_agent is False
+    assert acc.ignore_retriever is False
+    assert acc.ignore_chat_model is False
