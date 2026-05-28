@@ -19,7 +19,7 @@ from tradingagents.agents.schemas import PolymarketDecision, PolymarketDirection
 
 logger = logging.getLogger(__name__)
 
-_MIN_CONFIDENCE = 0.55
+_MIN_CONFIDENCE = 0.85      # matches script-level --min-confidence default; defense in depth
 _KELLY_MULTIPLIER = 0.50
 _MAX_FRACTION = 0.20        # higher cap than stocks — max loss is capped at $1/share
 _MIN_PRICE = 0.02           # skip markets priced below 2c (illiquid)
