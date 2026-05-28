@@ -120,22 +120,32 @@ def trader_prompt() -> str:
 
 
 def test_stock_trader_prompt_drops_confidence_anchor(trader_prompt: str):
-    """Regression: the old prompt had a numeric ladder ('0.48-0.52', '0.53-0.59')
-    that pinned sonnet to HOLD@0.54 across all stocks (4/5 of 2026-05-15 fire).
-    The new prompt must not reintroduce explicit confidence bands."""
+    """Regression locks. PR #21 banned the numeric ladder ('0.48-0.52' etc).
+    Today's PR also drops the three-condition (a)+(b)+(c) HOLD test that
+    forced 100% HOLD across 10 days of production fires by requiring all
+    three conditions to deviate from HOLD."""
     for banned in ("0.48-0.52", "0.53-0.59", "0.60-0.69", "0.70+"):
         assert banned not in trader_prompt, (
             f"prompt still contains anchor band {banned!r} — "
             f"sonnet will lock onto the middle of the lowest band"
         )
+    # The (a)+(b)+(c) three-condition test forced 100% HOLD across 10 days
+    # of production because almost nothing clears all three. Replaced by
+    # per-direction asymmetry framing.
+    assert "(a) a specific recent catalyst" not in trader_prompt
+    assert "(c) clear pricing dislocation relative to the catalyst" not in trader_prompt
 
 
-def test_stock_trader_prompt_has_default_to_hold_framing(trader_prompt: str):
-    """The new framing mirrors propagate_market: DEFAULT TO HOLD with a
-    concrete-catalyst test, not a numeric ladder."""
-    assert "DEFAULT TO HOLD" in trader_prompt
-    assert "catalyst" in trader_prompt.lower()
-    # Honest-confidence guidance (no number-from-band picking)
+def test_stock_trader_prompt_has_asymmetric_setup_framing(trader_prompt: str):
+    """The new framing forces the model to commit when it's reasoning
+    circularly between 'real positives' and 'real risks'."""
+    # Force commit on balanced cases (the previous prompt let model HOLD them)
+    assert '"balanced" is a high bar' in trader_prompt
+    assert "asymmetric" in trader_prompt.lower()
+    # Pre-event setups are now explicitly allowed as LONG/SHORT, not just HOLD
+    assert "Pre-event setups" in trader_prompt or "PRE-EVENT SETUPS" in trader_prompt
+    # SHORT base-rate caution preserved but softened (stretched setups OK)
+    assert "SHORT" in trader_prompt
+    assert "stretched" in trader_prompt.lower()
+    # Confidence still grounded in evidence, not bands
     assert "high evidence" in trader_prompt.lower()
-    # Short-side base-rate caution (asymmetric loss on shorts)
-    assert "SHORTING" in trader_prompt or "SHORTS" in trader_prompt
