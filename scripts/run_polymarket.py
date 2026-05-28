@@ -159,7 +159,31 @@ def main() -> int:
         default=1000.0,
         help="Total capital in USDC for Kelly sizing when --live is set (default: 1000.0)",
     )
+    parser.add_argument(
+        "--max-orders-per-fire",
+        type=int,
+        default=5,
+        help=(
+            "Defense-in-depth cap on submitted live orders in a single fire. "
+            "Default 5. Combined with --max-per-cluster=1, bounds daily exposure "
+            "even if the model produces many high-confidence decisions in one day. "
+            "Skipped trades log reason='max_orders_per_fire'. Only counts SUBMITTED "
+            "orders, not SKIPPED/ERROR. Pass 0 to disable."
+        ),
+    )
     args = parser.parse_args()
+
+    # Hard kill-switch. Setting this env var to anything truthy immediately
+    # short-circuits live mode regardless of CLI flags. Provides an
+    # out-of-band way to halt autotrade without editing the routine UI.
+    kill_switch = os.environ.get("TRADINGAGENTS_AUTOTRADE_KILL_SWITCH", "").strip()
+    if args.live and kill_switch and kill_switch.lower() not in ("0", "false", "no", ""):
+        print(
+            f"AUTOTRADE KILL SWITCH ACTIVE (TRADINGAGENTS_AUTOTRADE_KILL_SWITCH={kill_switch!r}) "
+            f"— --live disabled, falling back to paper mode.",
+            file=sys.stderr,
+        )
+        args.live = False
 
     # Validate --min-confidence. `float("nan")` parses cleanly but breaks the
     # gate silently (nan comparisons always return False), and values outside
@@ -285,6 +309,10 @@ def main() -> int:
     cluster_counts = Counter(
         count_fills_by_cluster(POLYMARKET_OUTPUT_DIR, date=now.strftime("%Y-%m-%d"))
     )
+
+    # Defense-in-depth: count SUBMITTED live orders in this fire so we can
+    # halt at --max-orders-per-fire even if many markets clear all gates.
+    live_orders_submitted = 0
 
     if not args.quiet:
         print(f"=== Analysing {len(markets)} markets with model={args.model} ===")
@@ -433,6 +461,27 @@ def main() -> int:
             continue
 
         if live_executor is not None:
+            # Per-fire order cap (defense in depth). Cluster cap bounds
+            # exposure per group; this bounds the total per fire even if
+            # we somehow have N high-conviction decisions across N clusters.
+            if (
+                args.max_orders_per_fire > 0
+                and live_orders_submitted >= args.max_orders_per_fire
+            ):
+                _skip_fill("max_orders_per_fire", {
+                    "direction": decision.direction.value,
+                    "confidence": decision.confidence,
+                    "cluster_id": cluster_id,
+                    "max_orders_per_fire": args.max_orders_per_fire,
+                    "live_orders_submitted_so_far": live_orders_submitted,
+                })
+                if not args.quiet:
+                    print(
+                        f"    fill: SKIP — max_orders_per_fire "
+                        f"({live_orders_submitted}/{args.max_orders_per_fire} already submitted)\n"
+                    )
+                continue
+
             # --- Live execution path ---
             result = live_executor.place_order(decision, token_id, args.capital)
             fill_payload = {
@@ -447,15 +496,19 @@ def main() -> int:
                 **result,
             }
             append_jsonl(fill_log_path, fill_payload)
-            # Update in-process cluster cache so subsequent iterations see
-            # this position. Only count actually-SUBMITTED orders, not errors.
-            if cluster_id and result.get("status") == "SUBMITTED":
-                cluster_counts[cluster_id] += 1
+            # Update in-process cluster cache + per-fire counter so
+            # subsequent iterations see this position. Only count
+            # actually-SUBMITTED orders, not SKIPPED or ERROR.
+            if result.get("status") == "SUBMITTED":
+                if cluster_id:
+                    cluster_counts[cluster_id] += 1
+                live_orders_submitted += 1
             if not args.quiet:
                 if result["status"] == "SUBMITTED":
                     print(
                         f"    order: SUBMITTED id={result['order_id']}  "
-                        f"${result['usd']:.2f} {result['direction']}"
+                        f"${result['usd']:.2f} {result['direction']}  "
+                        f"(fire total: {live_orders_submitted}/{args.max_orders_per_fire or '∞'})"
                     )
                 else:
                     print(f"    order: {result['status']} — {result.get('reason', '')}")
