@@ -127,13 +127,83 @@ def main() -> int:
                 file=sys.stderr,
             )
 
+    # Kill switch — same out-of-band stop as the polymarket routine. Any truthy
+    # value forces --no-fill regardless of Alpaca config.
+    kill_switch = os.environ.get("TRADINGAGENTS_AUTOTRADE_KILL_SWITCH", "").strip()
+    if executor is not None and kill_switch and kill_switch.lower() not in ("0", "false", "no", ""):
+        print(
+            f"AUTOTRADE KILL SWITCH ACTIVE ({kill_switch!r}) — skipping order submission.",
+            file=sys.stderr,
+        )
+        executor = None
+
     ta = TradingAgentsGraph(config=config)
     now = datetime.now(timezone.utc)
     log_path = _decision_log_path(now)
     order_log_path = _order_log_path(now)
 
     from tradingagents.exchange.cost_tracker import CostTracker
+    from tradingagents.exchange.loss_breaker import LossBreaker
+    from tradingagents.exchange.notifier import Notifier
+    from tradingagents.exchange.reconciliation import (
+        reconcile, count_open_positions_from_fills,
+    )
     cost_tracker = CostTracker(decision_log_path=log_path, budget_usd=args.daily_budget_usd)
+    notifier = Notifier()
+    # Per-instrument loss breaker state (independent of polymarket's).
+    loss_breaker = LossBreaker(STOCKS_OUTPUT_DIR / "loss_breaker.json")
+
+    # Pre-fire safety gates (only when about to place real/paper orders).
+    if executor is not None:
+        # 1) Loss breaker — daily realized loss / drawdown. Fails closed.
+        if loss_breaker.is_tripped():
+            st = loss_breaker.status()
+            print(
+                f"LOSS BREAKER TRIPPED {st['reasons']} — "
+                f"daily_pnl=${st['daily_realized_pnl']} drawdown=${st['drawdown']}. "
+                f"Skipping order submission this fire.",
+                file=sys.stderr,
+            )
+            notifier.breaker_tripped(st["reasons"], {
+                "daily_realized_pnl": st["daily_realized_pnl"],
+                "drawdown": st["drawdown"],
+            })
+            executor = None
+
+    if executor is not None:
+        # 2) Reconciliation — Alpaca gives REAL equity + position count, so this
+        # is a genuine balance AND position-drift check (better than polymarket).
+        prior_orders = []
+        op = order_log_path
+        if op.exists():
+            for line in op.read_text().splitlines():
+                if line.strip():
+                    try:
+                        prior_orders.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+        expected_positions = count_open_positions_from_fills(
+            [o.get("order", {}) | {"market_id": o.get("ticker")} for o in prior_orders]
+        )
+        equity = executor.get_account_equity()
+        # Seed the breaker's equity tracker so drawdown is measured from real
+        # account equity going forward.
+        if equity is not None:
+            loss_breaker.set_equity(equity)
+        recon = reconcile(
+            expected_open_positions=expected_positions,
+            actual_open_positions=executor.count_open_positions(),
+            intended_capital_usd=args.capital,
+            actual_balance_usd=equity,
+        )
+        if not recon.ok:
+            print(
+                f"RECONCILIATION HALT {list(recon.halt_reasons)} — {recon.detail}. "
+                f"Skipping order submission; reconcile manually.",
+                file=sys.stderr,
+            )
+            notifier.reconciliation_halt(list(recon.halt_reasons), recon.detail)
+            executor = None
 
     tickers = [t.upper() for t in args.tickers]
 
@@ -191,8 +261,21 @@ def main() -> int:
 
         if executor and decision.direction != StockDirection.HOLD:
             result = executor.place_order(decision, capital_usd=args.capital)
+            status = result["status"]
+            if status == "SUBMITTED":
+                # Real (or paper) order placed — alert + record a provisional
+                # 0 realized P&L so the breaker's equity tracker stays current.
+                notifier.order_filled(
+                    ticker, result["side"],
+                    result.get("notional_usd", 0.0), result.get("order_id", "?"),
+                )
+                loss_breaker.record_realized_pnl(0.0)
+            elif status == "ERROR":
+                notifier.send(
+                    f"Alpaca order ERROR on {ticker}: {result.get('reason', '')}",
+                    severity="warn",
+                )
             if not args.quiet:
-                status = result["status"]
                 if status == "SUBMITTED":
                     print(
                         f"    order: {status} id={result['order_id']} "

@@ -205,3 +205,44 @@ def test_order_error_returns_error_status(monkeypatch):
         result = executor.place_order(_long_decision(), capital_usd=10000)
     assert result["status"] == "ERROR"
     assert "connection timeout" in result["reason"]
+
+
+# ---- account equity + position fetch (loss breaker / reconciliation inputs) ----
+
+def _executor(monkeypatch, client):
+    monkeypatch.setenv("ALPACA_API_KEY", "fake_key")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "fake_secret")
+    monkeypatch.setenv("ALPACA_PAPER", "true")
+    with patch("tradingagents.exchange.alpaca_executor.TradingClient") as mock_tc:
+        mock_tc.return_value = client
+        return AlpacaExecutor()
+
+
+def test_get_account_equity_returns_float(monkeypatch):
+    client = MagicMock()
+    client.get_account.return_value = MagicMock(equity="10250.75")
+    ex = _executor(monkeypatch, client)
+    assert ex.get_account_equity() == 10250.75
+
+
+def test_get_account_equity_none_on_error(monkeypatch):
+    """Must return None (not 0) so the reconciler HALTS rather than trading
+    against a phantom zero balance."""
+    client = MagicMock()
+    client.get_account.side_effect = RuntimeError("api down")
+    ex = _executor(monkeypatch, client)
+    assert ex.get_account_equity() is None
+
+
+def test_count_open_positions(monkeypatch):
+    client = MagicMock()
+    client.get_all_positions.return_value = [MagicMock(), MagicMock(), MagicMock()]
+    ex = _executor(monkeypatch, client)
+    assert ex.count_open_positions() == 3
+
+
+def test_count_open_positions_none_on_error(monkeypatch):
+    client = MagicMock()
+    client.get_all_positions.side_effect = RuntimeError("api down")
+    ex = _executor(monkeypatch, client)
+    assert ex.count_open_positions() is None
