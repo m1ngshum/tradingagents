@@ -513,22 +513,33 @@ def main() -> int:
                 **result,
             }
             append_jsonl(fill_log_path, fill_payload)
-            # Update in-process cluster cache + per-fire counter so
-            # subsequent iterations see this position. Only count
-            # actually-SUBMITTED orders, not SKIPPED or ERROR.
-            if result.get("status") == "SUBMITTED":
+            # Reconciliation-aware accounting. Only a CONFIRMED FILL counts as a
+            # real position against the cluster cap + per-fire counter + loss
+            # breaker. UNFILLED is a clean no-op (FOK killed). UNCONFIRMED means
+            # the API didn't confirm — we do NOT assume a fill, but we DO flag
+            # it for human reconciliation (the dangerous middle case).
+            outcome = result.get("outcome")
+            if outcome == "FILLED":
                 if cluster_id:
                     cluster_counts[cluster_id] += 1
                 live_orders_submitted += 1
+                # Record the at-risk exposure as a provisional realized loss of
+                # 0 (position open); breaker tracks settled P&L via score_fills.
+                loss_breaker.record_realized_pnl(0.0)
             if not args.quiet:
-                if result["status"] == "SUBMITTED":
+                if outcome == "FILLED":
                     print(
-                        f"    order: SUBMITTED id={result['order_id']}  "
-                        f"${result['usd']:.2f} {result['direction']}  "
+                        f"    order: FILLED id={result['order_id']}  "
+                        f"${result.get('filled_usd', 0):.2f} {result['direction']}  "
                         f"(fire total: {live_orders_submitted}/{args.max_orders_per_fire or '∞'})"
                     )
+                elif outcome == "UNCONFIRMED":
+                    print(
+                        f"    order: UNCONFIRMED id={result.get('order_id')} "
+                        f"raw_status={result.get('order_status')} — RECONCILE MANUALLY"
+                    )
                 else:
-                    print(f"    order: {result['status']} — {result.get('reason', '')}")
+                    print(f"    order: {result.get('status')} — {result.get('reason', result.get('order_status', ''))}")
                 print()
             continue
 
