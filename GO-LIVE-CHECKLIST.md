@@ -38,25 +38,29 @@ articulate *why* you have edge that the market doesn't, stop here.
 
 Paper mode assumes you fill at the quoted price. Live, that assumption breaks.
 
-- [ ] **Fill reconciliation** — after submitting a CLOB/Alpaca order, confirm it
-      actually executed, at what VWAP, and handle partial fills.
-      **DONE (PR #31):** `classify_order_response` maps the CLOB response to
-      FILLED/UNFILLED/UNKNOWN and fails safe (unknown is never a fill).
-      `place_order` returns outcome + filled_usd; run_polymarket counts a
-      position only on confirmed FILLED and flags UNCONFIRMED for manual review.
-- [ ] **Slippage logging** — record decision-price vs actual-fill-price per trade
-      so EV analysis reflects reality, not theory. Feed this back into
-      analyze_performance.py. (filled_usd is now captured per fill; still need
-      to diff vs decision price and surface in the analyzer.)
-- [ ] **Balance/position reconciliation** — before each fire, compare actual
-      on-chain USDC (Polymarket) / Alpaca account positions vs what the bot
-      believes it holds. Halt on drift. (Drift silently kills bots.)
+- [x] **Fill reconciliation** — **DONE (PR #31):** `classify_order_response`
+      maps the CLOB response to FILLED/UNFILLED/UNKNOWN and fails safe (unknown
+      is never a fill). `place_order` returns outcome + filled_usd;
+      run_polymarket counts a position only on confirmed FILLED and flags
+      UNCONFIRMED for manual review.
+- [x] **Balance reconciliation** — **DONE (PR #33):** `reconcile()` HALTs
+      (downgrades to paper) before the fire if real USDC < intended capital, or
+      balance unreadable. Fails closed. `get_usdc_balance()` on the executor.
+- [ ] **Position-drift reconciliation** — PARTIAL. The balance leg is done;
+      true exchange-side position drift (fill log vs on-chain holdings) still
+      needs a holdings fetch. Open item — not safety-blocking for the canary
+      (max ~2 positions, manually verifiable), but required before scaling.
+- [ ] **Slippage logging** — record decision-price vs actual-fill-price per
+      trade. `filled_usd` is now captured per fill; still need to diff vs
+      decision price and surface in analyze_performance.py. (Analytics nicety,
+      not a safety gate.)
 - [ ] **UMA settlement gating** (Polymarket) — do not book P&L until
       `is_uma_finalized()` is true. The helper exists; wire it into live P&L so
-      a disputed resolution can't flip a "win" after you've sized on it.
-- [ ] **Alerting** — push to Slack/Telegram on every fill, every error, every
-      circuit-breaker trip. A live bot that fails silently in a routine log is a
-      liability. (Slack + Telegram connectors are already available.)
+      a disputed resolution can't flip a "win". (Accuracy of P&L, not a
+      runaway-safety gate.)
+- [x] **Alerting** — **DONE (PR #34):** `Notifier` pushes Slack alerts on fill,
+      breaker trip, reconciliation halt, unconfirmed order, fatal error. Fail-safe
+      (never raises), no-op when `TRADINGAGENTS_ALERT_WEBHOOK` unset.
 
 ---
 
