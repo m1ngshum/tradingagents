@@ -22,7 +22,10 @@ Output: a table of (signature_type, funder) -> balance. Pick the row whose
 balance matches your account. Set POLYMARKET_SIGNATURE_TYPE + POLYMARKET_FUNDER
 to that combo.
 
-Nothing here submits an order. The only network calls are balance reads.
+Nothing here submits an order and no funds move. Caveat: deriving L2 creds
+(create_or_derive_api_creds) will CREATE API credentials on Polymarket's
+backend the first time it runs for a key (idempotent after). That's an
+account-init side effect, not a trade — fine for an account you own.
 """
 
 from __future__ import annotations
@@ -61,7 +64,11 @@ def _read_balance(private_key: str, funder: str, sig_type: int) -> tuple[float |
         return None, f"py-clob-client missing: {e}"
 
     try:
-        # Derive L2 creds from the key (read path; creates-or-derives, no order).
+        # NOTE (PR #39 review): create_or_derive_api_creds() is NOT purely
+        # read-only — on a first-time key it CREATES L2 API credentials on
+        # Polymarket's backend (idempotent thereafter). It places no ORDERS and
+        # moves no funds, but it is an account-init side effect. Acceptable for
+        # an account you own; documented so it's not a surprise.
         boot = ClobClient(_HOST, key=private_key, chain_id=_CHAIN_ID,
                           signature_type=sig_type, funder=funder)
         creds = boot.create_or_derive_api_creds()
@@ -109,7 +116,7 @@ def main() -> int:
     print(f"{'sig_type':>8}  {'funder':<44}  balance / note")
     print("-" * 80)
 
-    best = None
+    funded = []  # (sig_type, funder, balance) for every combo with balance > 0
     for sig_type in (0, 1, 2):
         for funder in candidates:
             bal, note = _read_balance(key, funder, sig_type)
@@ -117,17 +124,24 @@ def main() -> int:
             flag = ""
             if bal is not None and bal > 0:
                 flag = "  <== HAS BALANCE"
-                if best is None or bal > best[2]:
-                    best = (sig_type, funder, bal)
+                funded.append((sig_type, funder, bal))
             print(f"{sig_type:>8}  {funder:<44}  {shown}{flag}")
 
     print()
-    if best:
-        st, fn, bal = best
+    if len(funded) == 1:
+        st, fn, bal = funded[0]
         print(f"CORRECT COMBO: POLYMARKET_SIGNATURE_TYPE={st}  "
               f"POLYMARKET_FUNDER={fn}  (balance ${bal:.2f})")
         print("Set those two env vars on the routine. The funder!=signer guard "
               "in PolymarketExecutor will confirm consistency at startup.")
+    elif len(funded) > 1:
+        # PR #39 review: do NOT silently pick the highest balance. Multiple
+        # funded combos means the human must disambiguate against the UI.
+        print("WARNING: MORE THAN ONE combo reports a balance. Do NOT assume the "
+              "largest is correct — pick the one whose funder address matches what "
+              "Polymarket's Deposit-on-Polygon flow shows for YOUR account:")
+        for st, fn, bal in funded:
+            print(f"  - SIGNATURE_TYPE={st}  FUNDER={fn}  (${bal:.2f})")
     else:
         print("No combo reported a positive balance. Either the candidate "
               "funder addresses are wrong (get the Polygon deposit address from "

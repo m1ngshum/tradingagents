@@ -176,3 +176,34 @@ class TestSignatureType:
             mock_clob.return_value = MagicMock()
             ex = PolymarketExecutor()
         assert ex._signature_type == 0
+
+    def test_proxy_type_fails_closed_when_signer_underivable(self, monkeypatch):
+        """PR #38 review CRITICAL: if the signer address can't be derived
+        (bad key / eth_account missing), the funder!=signer guard cannot run.
+        For a proxy type that MUST fail closed, not proceed unguarded."""
+        self._set_base_env(monkeypatch, sig_type=1, funder="0xPROXYWALLET")
+        with patch("tradingagents.exchange.polymarket_executor.ClobClient") as mock_clob, \
+             patch.object(PolymarketExecutor, "_derive_signer_address", return_value=None):
+            mock_clob.return_value = MagicMock()
+            with pytest.raises(PolymarketExecutionDisabled, match="derivation failed|Refusing"):
+                PolymarketExecutor()
+
+    def test_eoa_type_unaffected_when_signer_underivable(self, monkeypatch):
+        """The fail-closed rule applies ONLY to proxy types. EOA (type 0) does
+        not need the guard, so underivable signer must NOT block it."""
+        self._set_base_env(monkeypatch, sig_type=0, funder=self._SIGNER)
+        with patch("tradingagents.exchange.polymarket_executor.ClobClient") as mock_clob, \
+             patch.object(PolymarketExecutor, "_derive_signer_address", return_value=None):
+            mock_clob.return_value = MagicMock()
+            ex = PolymarketExecutor()  # must NOT raise
+        assert ex._signature_type == 0
+
+    def test_proxy_guard_is_case_insensitive(self, monkeypatch):
+        """PR #38 review: funder==signer comparison must catch a checksummed-vs-
+        lowercase mismatch (same address, different case) — else the guard is
+        bypassable by casing."""
+        self._set_base_env(monkeypatch, sig_type=1, funder=self._SIGNER.lower())
+        with patch("tradingagents.exchange.polymarket_executor.ClobClient") as mock_clob:
+            mock_clob.return_value = MagicMock()
+            with pytest.raises(PolymarketExecutionDisabled, match="proxy"):
+                PolymarketExecutor()
