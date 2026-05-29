@@ -153,15 +153,32 @@ class PolymarketExecutor:
     """Submit live orders to Polymarket CLOB for PolymarketDecisions.
 
     Requires env vars:
-        POLYMARKET_PRIVATE_KEY   — proxy wallet private key (for order signing)
+        POLYMARKET_PRIVATE_KEY   — signer private key (for order signing)
         POLYMARKET_KEY           — L2 API key
         POLYMARKET_SECRET        — L2 API secret
         POLYMARKET_PASSPHRASE    — L2 API passphrase
-        POLYMARKET_FUNDER        — proxy wallet address
+        POLYMARKET_FUNDER        — wallet holding USDC collateral (the funder)
+
+    Account-type env var (CRITICAL — wrong value = orders sign against the
+    wrong wallet and fail or misbehave):
+        POLYMARKET_SIGNATURE_TYPE — 0 | 1 | 2. Default 0.
+            0 = EOA: signer address IS the funder (browser wallet you control
+                directly, key == funder address).
+            1 = Magic/email (Polymarket proxy): you log in with email/Google;
+                the signer EOA controls a SEPARATE proxy contract that holds
+                the USDC. FUNDER MUST be that proxy/deposit address, NOT the
+                signer address. This is the type for email-login accounts.
+            2 = browser-wallet proxy (MetaMask-linked Polymarket proxy).
+
+    For signature_type 1/2 the funder ≠ signer; set POLYMARKET_FUNDER to the
+    Polygon proxy address that actually holds your collateral (the address
+    Polymarket's Deposit-on-Polygon flow funds, NOT the Ethereum bridge
+    address and NOT the "API use only" profile address).
     """
 
     _HOST = "https://clob.polymarket.com"
     _CHAIN_ID = 137  # Polygon
+    _VALID_SIG_TYPES = (0, 1, 2)
 
     def __init__(self) -> None:
         if ClobClient is None:
@@ -172,6 +189,7 @@ class PolymarketExecutor:
         api_secret = os.environ.get("POLYMARKET_SECRET")
         api_passphrase = os.environ.get("POLYMARKET_PASSPHRASE")
         funder = os.environ.get("POLYMARKET_FUNDER")
+        sig_type = self._resolve_signature_type()
 
         missing = [
             k for k, v in {
@@ -185,6 +203,24 @@ class PolymarketExecutor:
         if missing:
             raise PolymarketExecutionDisabled(f"Missing env vars: {', '.join(missing)}")
 
+        # Guard the silent-misconfig footgun: for proxy account types the funder
+        # MUST differ from the signer's own address. If someone sets sig_type=1
+        # but points funder at the signer EOA, orders sign against an empty
+        # wallet. We can't always know the signer address cheaply, but if the
+        # funder equals the key's address for a proxy type, that's certainly wrong.
+        self._signer_address = self._derive_signer_address(private_key)
+        if (
+            sig_type in (1, 2)
+            and self._signer_address is not None
+            and funder.lower() == self._signer_address.lower()
+        ):
+            raise PolymarketExecutionDisabled(
+                f"POLYMARKET_SIGNATURE_TYPE={sig_type} (proxy) but POLYMARKET_FUNDER "
+                f"equals the signer address {funder}. For proxy accounts the funder "
+                f"must be the SEPARATE proxy wallet that holds USDC, not the signer. "
+                f"Set POLYMARKET_FUNDER to your Polygon proxy/deposit address."
+            )
+
         creds = ApiCreds(
             api_key=api_key,
             api_secret=api_secret,
@@ -195,10 +231,41 @@ class PolymarketExecutor:
             key=private_key,
             chain_id=self._CHAIN_ID,
             creds=creds,
-            signature_type=0,   # EOA (Type 0) — key address == funder address
+            signature_type=sig_type,
             funder=funder,
         )
-        logger.info("PolymarketExecutor ready (funder=%s)", funder)
+        self._signature_type = sig_type
+        self._funder = funder
+        logger.info(
+            "PolymarketExecutor ready (signature_type=%s funder=%s signer=%s)",
+            sig_type, funder, self._signer_address,
+        )
+
+    @classmethod
+    def _resolve_signature_type(cls) -> int:
+        raw = os.environ.get("POLYMARKET_SIGNATURE_TYPE", "0").strip()
+        try:
+            v = int(raw)
+        except ValueError:
+            raise PolymarketExecutionDisabled(
+                f"POLYMARKET_SIGNATURE_TYPE must be 0, 1, or 2; got {raw!r}"
+            )
+        if v not in cls._VALID_SIG_TYPES:
+            raise PolymarketExecutionDisabled(
+                f"POLYMARKET_SIGNATURE_TYPE must be 0, 1, or 2; got {v}"
+            )
+        return v
+
+    @staticmethod
+    def _derive_signer_address(private_key: str) -> str | None:
+        """Best-effort derive the signer's address from its key (for the
+        funder!=signer safety check). Returns None if eth_account isn't
+        available — the check is then skipped, never blocks on its own absence."""
+        try:
+            from eth_account import Account
+            return Account.from_key(private_key).address
+        except Exception:  # noqa: BLE001 — derivation is advisory only
+            return None
 
     def get_usdc_balance(self) -> float | None:
         """Best-effort live USDC collateral balance. None if it can't be read.

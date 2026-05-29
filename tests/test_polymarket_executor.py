@@ -1,6 +1,7 @@
 """Tests for PolymarketExecutor sizing logic."""
 
 import pytest
+from unittest.mock import MagicMock, patch
 from tradingagents.agents.schemas import PolymarketDecision, PolymarketDirection
 from tradingagents.exchange.polymarket_executor import (
     PolymarketExecutionDisabled,
@@ -104,3 +105,74 @@ class TestPolymarketExecutorGate:
         monkeypatch.setenv("POLYMARKET_FUNDER", "0xabc")
         with pytest.raises(PolymarketExecutionDisabled, match="POLYMARKET_KEY"):
             PolymarketExecutor()
+
+
+# ---------------------------------------------------------------------------
+# Signature-type / account-type support (Magic/proxy accounts)
+# ---------------------------------------------------------------------------
+
+class TestSignatureType:
+    # Deterministic: key 0x11..1 -> this address (eth_account).
+    _KEY = "0x" + "1" * 64
+    _SIGNER = "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A"
+
+    def _set_base_env(self, mp, sig_type=None, funder="0xPROXY"):
+        mp.setenv("POLYMARKET_PRIVATE_KEY", self._KEY)
+        mp.setenv("POLYMARKET_KEY", "k")
+        mp.setenv("POLYMARKET_SECRET", "s")
+        mp.setenv("POLYMARKET_PASSPHRASE", "p")
+        mp.setenv("POLYMARKET_FUNDER", funder)
+        if sig_type is None:
+            mp.delenv("POLYMARKET_SIGNATURE_TYPE", raising=False)
+        else:
+            mp.setenv("POLYMARKET_SIGNATURE_TYPE", str(sig_type))
+
+    def test_default_signature_type_is_zero(self, monkeypatch):
+        assert PolymarketExecutor._resolve_signature_type() == 0
+        monkeypatch.setenv("POLYMARKET_SIGNATURE_TYPE", "")  # blank -> default
+        # blank string strips to '' then int('') raises -> disabled
+        with pytest.raises(PolymarketExecutionDisabled):
+            PolymarketExecutor._resolve_signature_type()
+
+    def test_valid_signature_types(self, monkeypatch):
+        for t in (0, 1, 2):
+            monkeypatch.setenv("POLYMARKET_SIGNATURE_TYPE", str(t))
+            assert PolymarketExecutor._resolve_signature_type() == t
+
+    def test_invalid_signature_type_rejected(self, monkeypatch):
+        for bad in ("3", "-1", "foo", "1.5"):
+            monkeypatch.setenv("POLYMARKET_SIGNATURE_TYPE", bad)
+            with pytest.raises(PolymarketExecutionDisabled):
+                PolymarketExecutor._resolve_signature_type()
+
+    def test_signer_address_derivation(self):
+        assert PolymarketExecutor._derive_signer_address(self._KEY) == self._SIGNER
+
+    def test_proxy_type_with_funder_equal_signer_is_rejected(self, monkeypatch):
+        """THE footgun: sig_type=1 (proxy) but funder points at the signer EOA.
+        That signs against an empty wallet. Must fail closed at construction."""
+        self._set_base_env(monkeypatch, sig_type=1, funder=self._SIGNER)
+        with patch("tradingagents.exchange.polymarket_executor.ClobClient") as mock_clob:
+            mock_clob.return_value = MagicMock()
+            with pytest.raises(PolymarketExecutionDisabled, match="proxy"):
+                PolymarketExecutor()
+
+    def test_proxy_type_with_distinct_funder_constructs(self, monkeypatch):
+        """sig_type=1 with a proper separate proxy funder must construct and
+        pass signature_type=1 + the proxy funder to ClobClient."""
+        self._set_base_env(monkeypatch, sig_type=1, funder="0xPROXYWALLET")
+        with patch("tradingagents.exchange.polymarket_executor.ClobClient") as mock_clob:
+            mock_clob.return_value = MagicMock()
+            ex = PolymarketExecutor()
+        _, kwargs = mock_clob.call_args
+        assert kwargs["signature_type"] == 1
+        assert kwargs["funder"] == "0xPROXYWALLET"
+        assert ex._signature_type == 1
+
+    def test_eoa_type_allows_funder_equal_signer(self, monkeypatch):
+        """sig_type=0 (EOA) is the case where funder==signer is CORRECT."""
+        self._set_base_env(monkeypatch, sig_type=0, funder=self._SIGNER)
+        with patch("tradingagents.exchange.polymarket_executor.ClobClient") as mock_clob:
+            mock_clob.return_value = MagicMock()
+            ex = PolymarketExecutor()
+        assert ex._signature_type == 0
