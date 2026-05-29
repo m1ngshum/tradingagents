@@ -205,21 +205,27 @@ class PolymarketExecutor:
 
         # Guard the silent-misconfig footgun: for proxy account types the funder
         # MUST differ from the signer's own address. If someone sets sig_type=1
-        # but points funder at the signer EOA, orders sign against an empty
-        # wallet. We can't always know the signer address cheaply, but if the
-        # funder equals the key's address for a proxy type, that's certainly wrong.
+        # but points funder at the signer EOA, orders sign against an empty wallet.
         self._signer_address = self._derive_signer_address(private_key)
-        if (
-            sig_type in (1, 2)
-            and self._signer_address is not None
-            and funder.lower() == self._signer_address.lower()
-        ):
-            raise PolymarketExecutionDisabled(
-                f"POLYMARKET_SIGNATURE_TYPE={sig_type} (proxy) but POLYMARKET_FUNDER "
-                f"equals the signer address {funder}. For proxy accounts the funder "
-                f"must be the SEPARATE proxy wallet that holds USDC, not the signer. "
-                f"Set POLYMARKET_FUNDER to your Polygon proxy/deposit address."
-            )
+        if sig_type in (1, 2):
+            # CRITICAL (PR #38 review): the guard must NOT silently disable
+            # itself. If the signer address can't be derived (malformed key or
+            # eth_account missing), we cannot prove funder != signer — so for a
+            # money-moving proxy config we FAIL CLOSED, not proceed unguarded.
+            if self._signer_address is None:
+                raise PolymarketExecutionDisabled(
+                    f"POLYMARKET_SIGNATURE_TYPE={sig_type} (proxy) requires deriving the "
+                    f"signer address to validate funder != signer, but derivation failed "
+                    f"(malformed POLYMARKET_PRIVATE_KEY or eth_account missing). Refusing "
+                    f"to trade unguarded — install eth-account and verify the key."
+                )
+            if funder.lower() == self._signer_address.lower():
+                raise PolymarketExecutionDisabled(
+                    f"POLYMARKET_SIGNATURE_TYPE={sig_type} (proxy) but POLYMARKET_FUNDER "
+                    f"equals the signer address {funder}. For proxy accounts the funder "
+                    f"must be the SEPARATE proxy wallet that holds USDC, not the signer. "
+                    f"Set POLYMARKET_FUNDER to your Polygon proxy/deposit address."
+                )
 
         creds = ApiCreds(
             api_key=api_key,
