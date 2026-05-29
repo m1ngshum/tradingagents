@@ -229,6 +229,8 @@ def main() -> int:
     # to trade at all this fire. Fails CLOSED on corrupt state. Per-instrument
     # state file so polymarket and stocks breakers are independent.
     from tradingagents.exchange.loss_breaker import LossBreaker
+    from tradingagents.exchange.notifier import Notifier
+    notifier = Notifier()
     loss_breaker = LossBreaker(POLYMARKET_OUTPUT_DIR / "loss_breaker.json")
     if args.live and loss_breaker.is_tripped():
         st = loss_breaker.status()
@@ -239,6 +241,10 @@ def main() -> int:
             f"Downgrading to paper mode this fire. Clear with LossBreaker.reset() after review.",
             file=sys.stderr,
         )
+        notifier.breaker_tripped(st["reasons"], {
+            "daily_realized_pnl": st["daily_realized_pnl"],
+            "drawdown": st["drawdown"],
+        })
         live_executor = None
 
     market_kwargs: dict = {"limit": args.limit}
@@ -361,6 +367,7 @@ def main() -> int:
                 f"Downgrading to paper this fire; reconcile manually before live.",
                 file=sys.stderr,
             )
+            notifier.reconciliation_halt(list(recon.halt_reasons), recon.detail)
             live_executor = None
 
     if not args.quiet:
@@ -558,6 +565,15 @@ def main() -> int:
                 # Record the at-risk exposure as a provisional realized loss of
                 # 0 (position open); breaker tracks settled P&L via score_fills.
                 loss_breaker.record_realized_pnl(0.0)
+                notifier.order_filled(
+                    question, decision.direction.value,
+                    result.get("filled_usd", 0.0), result.get("order_id", "?"),
+                )
+            elif outcome == "UNCONFIRMED":
+                notifier.unconfirmed_order(
+                    question, result.get("order_id", "?"),
+                    result.get("order_status", "?"),
+                )
             if not args.quiet:
                 if outcome == "FILLED":
                     print(
