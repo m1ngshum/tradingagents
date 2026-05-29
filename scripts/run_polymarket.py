@@ -224,6 +224,23 @@ def main() -> int:
             print(f"ERROR: cannot enable --live: {e}", file=sys.stderr)
             return 2
 
+    # Realized-loss circuit breaker. Checked once before the market loop in
+    # live mode: if today's losses or total drawdown breached a limit, refuse
+    # to trade at all this fire. Fails CLOSED on corrupt state. Per-instrument
+    # state file so polymarket and stocks breakers are independent.
+    from tradingagents.exchange.loss_breaker import LossBreaker
+    loss_breaker = LossBreaker(POLYMARKET_OUTPUT_DIR / "loss_breaker.json")
+    if args.live and loss_breaker.is_tripped():
+        st = loss_breaker.status()
+        print(
+            f"LOSS BREAKER TRIPPED {st['reasons']} — "
+            f"daily_pnl=${st['daily_realized_pnl']} (limit -${st['daily_loss_limit']}), "
+            f"drawdown=${st['drawdown']} (limit ${st['drawdown_limit']}). "
+            f"Downgrading to paper mode this fire. Clear with LossBreaker.reset() after review.",
+            file=sys.stderr,
+        )
+        live_executor = None
+
     market_kwargs: dict = {"limit": args.limit}
     if args.days_until_close is not None:
         today = datetime.now(timezone.utc).date()
