@@ -39,11 +39,15 @@ articulate *why* you have edge that the market doesn't, stop here.
 Paper mode assumes you fill at the quoted price. Live, that assumption breaks.
 
 - [ ] **Fill reconciliation** — after submitting a CLOB/Alpaca order, confirm it
-      actually executed, at what VWAP, and handle partial fills. The executor
-      currently submits FOK but does not verify settlement.
+      actually executed, at what VWAP, and handle partial fills.
+      **DONE (PR #31):** `classify_order_response` maps the CLOB response to
+      FILLED/UNFILLED/UNKNOWN and fails safe (unknown is never a fill).
+      `place_order` returns outcome + filled_usd; run_polymarket counts a
+      position only on confirmed FILLED and flags UNCONFIRMED for manual review.
 - [ ] **Slippage logging** — record decision-price vs actual-fill-price per trade
       so EV analysis reflects reality, not theory. Feed this back into
-      analyze_performance.py.
+      analyze_performance.py. (filled_usd is now captured per fill; still need
+      to diff vs decision price and surface in the analyzer.)
 - [ ] **Balance/position reconciliation** — before each fire, compare actual
       on-chain USDC (Polymarket) / Alpaca account positions vs what the bot
       believes it holds. Halt on drift. (Drift silently kills bots.)
@@ -58,11 +62,13 @@ Paper mode assumes you fill at the quoted price. Live, that assumption breaks.
 
 ## STAGE 2 — Risk circuit breakers (build alongside Stage 1)
 
-- [ ] **Daily loss limit** → auto-trips kill switch (down $X today → paper rest
-      of day). Distinct from the existing cost ceiling, which caps LLM spend not
-      trading losses.
-- [ ] **Total drawdown breaker** → down X% from peak equity → halt entirely,
-      require manual re-arm.
+- [x] **Daily loss limit** → **DONE (PR #30):** `LossBreaker` trips when
+      cumulative realized loss today ≥ limit (env `TRADINGAGENTS_DAILY_LOSS_LIMIT_USD`,
+      default $30). Wired into run_polymarket live path; downgrades to paper.
+- [x] **Total drawdown breaker** → **DONE (PR #30):** `LossBreaker` trips when
+      peak-to-trough equity drawdown ≥ limit (env `TRADINGAGENTS_MAX_DRAWDOWN_USD`,
+      default $50). Sticky across UTC rollover; requires `reset()` to clear.
+      Fails CLOSED on corrupt state.
 - [ ] **Capital laddering** → start at $100, raise only after N consecutive
       profitable fires. Never jump to size.
 - [ ] **Per-instrument caps** verified live: cluster cap (Polymarket negRisk),
