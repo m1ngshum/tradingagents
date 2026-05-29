@@ -98,6 +98,31 @@ class AlpacaExecutor:
         self._paper = paper
         logger.info("AlpacaExecutor ready (paper=%s)", paper)
 
+    def get_account_equity(self) -> float | None:
+        """Real account equity from Alpaca. None on error (so the loss breaker
+        and reconciler treat it as unavailable and HALT, rather than reading a
+        missing value as zero). Unlike Polymarket, this is genuine broker-side
+        equity — the loss breaker grounded on it tracks real drawdown."""
+        try:
+            acct = self._client.get_account()
+            raw = getattr(acct, "equity", None)
+            return float(raw) if raw is not None else None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("get_account_equity failed: %s", exc)
+            return None
+
+    def count_open_positions(self) -> int | None:
+        """Exchange-side open-position count. None on error.
+
+        This is the genuine position-drift signal the Polymarket side lacks —
+        Alpaca reports actual held positions, so reconciliation here compares
+        the bot's fill log against real broker state."""
+        try:
+            return len(self._client.get_all_positions())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("count_open_positions failed: %s", exc)
+            return None
+
     def place_order(
         self,
         decision: StockDecision,
