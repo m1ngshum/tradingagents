@@ -9,21 +9,36 @@ Safety ≠ profitability. These guards protect capital; they do not create
 returns. See STRATEGY.md for the (negative) edge finding and GO-LIVE-CHECKLIST.md
 for the full path to live.
 
+## Coverage: BOTH instruments
+
+The guard stack is wired into **both** trading surfaces:
+- **Polymarket** (`run_polymarket.py`) — CLOB execution
+- **Stocks** (`run_stocks.py`, Alpaca) — equity execution (PR #36)
+
+Stocks reconciliation is actually **stronger**: Alpaca's `get_account_equity()`
+and `count_open_positions()` return real broker state, so the loss breaker
+tracks genuine account drawdown and reconciliation is a true position-drift
+check. Polymarket has the balance leg only (on-chain holdings fetch still open).
+
 ## The guard stack (every live order passes through all of these)
 
-| # | Guard | Trips on | Failure mode | Module | PR |
-|---|-------|----------|--------------|--------|-----|
-| 1 | Kill switch | Manual env flag | n/a (manual) | run_polymarket | #25 |
-| 2 | Rate limiter | >100 LLM calls/UTC-day | fail-open (cheap) | rate_limiter.py | — |
-| 3 | Cost ceiling | LLM $ spend/day | fail-open (cheap) | cost_tracker.py | #18 |
-| 4 | **Loss breaker** | Daily realized loss / drawdown | **fail-CLOSED** | loss_breaker.py | #30 |
-| 5 | **Balance recon** | Real USDC < intended capital | **fail-CLOSED** | reconciliation.py | #33 |
-| 6 | Min-confidence | conf < 0.85 (script + executor) | block | run_polymarket / executor | #17/#25 |
-| 7 | Cluster cap | >1 position per negRisk group | block | scoring.py | #18 |
-| 8 | Max-orders/fire | >N orders in one fire | block | run_polymarket | #25 |
-| 9 | Kelly + 20% cap | position > 20% capital | clamp | polymarket_executor.py | — |
-| 10 | **Fill reconciliation** | Unconfirmed/killed order | **fail-CLOSED** (never assume fill) | polymarket_executor.py | #31 |
-| 11 | **Alerting** | fill / trip / halt / error | fail-safe (silence, never crash) | notifier.py | #34 |
+| # | Guard | Trips on | Failure mode | PM | Stocks |
+|---|-------|----------|--------------|----|----|
+| 1 | Kill switch | Manual env flag | n/a (manual) | #25 | #36 |
+| 2 | Rate limiter | >100 LLM calls/UTC-day | fail-open (cheap) | ✅ | n/a |
+| 3 | Cost ceiling | LLM $ spend/day | fail-open (cheap) | #18 | ✅ |
+| 4 | **Loss breaker** | Daily realized loss / drawdown | **fail-CLOSED** | #30 | #36 |
+| 5 | **Balance recon** | Real funds < intended capital | **fail-CLOSED** | #33 | #36 |
+| 5b | **Position-drift recon** | fill log ≠ broker positions | **fail-CLOSED** | open | **#36 ✅** |
+| 6 | Min-confidence | below threshold (script + executor) | block | #17/#25 | ✅ |
+| 7 | Cluster cap | >1 position per negRisk group | block | #18 | n/a |
+| 8 | Max-orders/fire | >N orders in one fire | block | #25 | — |
+| 9 | Kelly + cap | position > cap (20% PM / 10% stk) | clamp | ✅ | ✅ |
+| 10 | **Fill reconciliation** | Unconfirmed/killed order | **fail-CLOSED** | #31 | n/a* |
+| 11 | **Alerting** | fill / trip / halt / error | fail-safe (silence, never crash) | #34 | #36 |
+
+*Alpaca returns concrete order status objects; the FOK-ambiguity problem that
+required `classify_order_response` on the CLOB side doesn't arise the same way.
 
 ## The two design principles
 
@@ -60,22 +75,24 @@ TRADINGAGENTS_POLYMARKET_DAILY_BUDGET_USD  # LLM $ ceiling
 
 ## Remaining (not runaway-safety gates; required before SCALING beyond canary)
 
-- **Exchange-side position-drift detection** — balance leg done; on-chain
-  holdings fetch not yet wired. For the canary (max ~2 positions/day) positions
-  are manually verifiable. Required before larger size.
+- **Polymarket exchange-side position-drift detection** — balance leg done;
+  on-chain holdings fetch not yet wired. (Stocks already has this via Alpaca,
+  PR #36.) For the PM canary (max ~2 positions/day) positions are manually
+  verifiable. Required before larger PM size.
 - **Slippage logging** — `filled_usd` captured; not yet diffed vs decision price.
-- **UMA settlement gating** — don't book P&L until finalized. Affects P&L
-  accuracy, not runaway risk.
+- **UMA settlement gating** (Polymarket) — don't book P&L until finalized.
+  Affects P&L accuracy, not runaway risk.
 - **Capital laddering** — programmatic ramp from $100 only after N profitable
   fires. Currently manual via `--capital`.
 
 ## Verdict
 
-For **canary-scale** live trading ($100 capital, ≤2 orders/fire), the runaway-
-safety surface is closed: the bot cannot lose more than the daily/drawdown
-limits, cannot trade against funds it lacks, cannot assume phantom fills, and
-cannot fail without alerting. The open items above gate *scaling*, not initial
-safe operation.
+For **canary-scale** live trading ($100 capital, ≤2 orders/fire) on **both
+Polymarket and stocks**, the runaway-safety surface is closed: the bot cannot
+lose more than the daily/drawdown limits, cannot trade against funds it lacks,
+cannot assume phantom fills, and cannot fail without alerting. Stocks
+additionally has true exchange-side position-drift detection. The open items
+above gate *scaling*, not initial safe operation.
 
 This does not mean go live — Gate 0 (demonstrated edge, see GO-LIVE-CHECKLIST.md)
 is still open and the strategy is −EV. It means: IF you go live at canary scale,
