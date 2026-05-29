@@ -37,6 +37,58 @@ class PolymarketExecutionDisabled(Exception):
     """Raised when Polymarket credentials are not configured."""
 
 
+# CLOB post_order response `status` values. A FOK (fill-or-kill) order either
+# matches fully or is killed; "matched" is the only fill. Anything else means
+# we do NOT hold the position, and the caller must not record exposure.
+# Reference: py-clob-client OrderType.FOK responses.
+_FILLED_STATUSES = frozenset({"matched"})
+_UNFILLED_STATUSES = frozenset({"unmatched", "cancelled", "canceled", "killed", "delayed"})
+
+
+def classify_order_response(resp: dict) -> dict:
+    """Map a raw CLOB post_order response to a settlement verdict.
+
+    Returns dict with:
+        outcome: FILLED | UNFILLED | UNKNOWN
+        order_status: the raw status string
+        filled_usd: best-effort matched notional (0.0 if unfilled/unknown)
+
+    FAIL-SAFE: an unrecognised or missing status is UNKNOWN, never FILLED.
+    The caller treats UNKNOWN as "did not fill" for exposure accounting and
+    flags it for human reconciliation — we never assume a position exists
+    without explicit confirmation.
+    """
+    if not isinstance(resp, dict):
+        return {"outcome": "UNKNOWN", "order_status": "no_response", "filled_usd": 0.0}
+
+    # success=False short-circuits to UNFILLED regardless of status text.
+    if resp.get("success") is False:
+        return {
+            "outcome": "UNFILLED",
+            "order_status": str(resp.get("status", "failed")),
+            "filled_usd": 0.0,
+        }
+
+    status = str(resp.get("status", "")).strip().lower()
+
+    # Best-effort matched notional. CLOB returns making/taking amounts as
+    # strings; for a BUY, the USDC we spent is the "making" side.
+    filled_usd = 0.0
+    for key in ("makingAmount", "making_amount", "matchedAmount"):
+        if key in resp:
+            try:
+                filled_usd = float(resp[key])
+                break
+            except (TypeError, ValueError):
+                pass
+
+    if status in _FILLED_STATUSES:
+        return {"outcome": "FILLED", "order_status": status, "filled_usd": filled_usd}
+    if status in _UNFILLED_STATUSES:
+        return {"outcome": "UNFILLED", "order_status": status, "filled_usd": 0.0}
+    return {"outcome": "UNKNOWN", "order_status": status or "missing", "filled_usd": 0.0}
+
+
 def size_polymarket_order(
     decision: PolymarketDecision,
     capital_usd: float,
@@ -188,19 +240,34 @@ class PolymarketExecutor:
             signed_order = self._client.create_market_order(order_args)
             resp = self._client.post_order(signed_order, OrderType.FOK)
 
-            order_id = resp.get("orderID", resp.get("id", "unknown"))
-            status_raw = resp.get("status", "unknown")
-            logger.info(
-                "Polymarket order submitted: market=%s direction=%s usd=%.2f id=%s",
-                decision.market_id, decision.direction.value, sizing["usd"], order_id,
+            order_id = resp.get("orderID", resp.get("id", "unknown")) if isinstance(resp, dict) else "unknown"
+            verdict = classify_order_response(resp if isinstance(resp, dict) else {})
+
+            # Reconciliation: only FILLED counts as a real position. UNFILLED is
+            # a clean no-op (FOK killed). UNKNOWN means we could not confirm —
+            # surface it loudly so a human reconciles rather than the bot
+            # silently assuming a fill it may not have.
+            status_map = {"FILLED": "FILLED", "UNFILLED": "UNFILLED", "UNKNOWN": "UNCONFIRMED"}
+            result_status = status_map[verdict["outcome"]]
+            # Exposure recorded only on confirmed fill; fall back to intended
+            # size if the API didn't echo a matched amount.
+            filled_usd = verdict["filled_usd"] or (sizing["usd"] if verdict["outcome"] == "FILLED" else 0.0)
+
+            log_fn = logger.info if verdict["outcome"] == "FILLED" else logger.warning
+            log_fn(
+                "Polymarket order %s: market=%s dir=%s intended=$%.2f filled=$%.2f id=%s raw_status=%s",
+                result_status, decision.market_id, decision.direction.value,
+                sizing["usd"], filled_usd, order_id, verdict["order_status"],
             )
             return {
-                "status": "SUBMITTED",
+                "status": result_status,
                 "order_id": order_id,
-                "order_status": status_raw,
+                "order_status": verdict["order_status"],
+                "outcome": verdict["outcome"],
                 "direction": decision.direction.value,
                 "token_id": token_id,
                 "usd": sizing["usd"],
+                "filled_usd": filled_usd,
                 "buy_price": buy_price,
                 "sizing": sizing,
                 "market_id": decision.market_id,
