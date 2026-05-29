@@ -200,6 +200,26 @@ class PolymarketExecutor:
         )
         logger.info("PolymarketExecutor ready (funder=%s)", funder)
 
+    def get_usdc_balance(self) -> float | None:
+        """Best-effort live USDC collateral balance. None if it can't be read.
+
+        Returns None (not 0) on any error so the reconciler treats it as
+        'unavailable' and HALTS rather than reading a missing balance as zero
+        and trading against phantom funds.
+        """
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            resp = self._client.get_balance_allowance(params)
+            raw = resp.get("balance") if isinstance(resp, dict) else None
+            if raw is None:
+                return None
+            # CLOB returns balance in USDC base units (6 decimals).
+            return float(raw) / 1_000_000.0
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("get_usdc_balance failed: %s", exc)
+            return None
+
     def place_order(
         self,
         decision: PolymarketDecision,

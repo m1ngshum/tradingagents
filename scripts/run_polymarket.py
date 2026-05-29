@@ -331,6 +331,38 @@ def main() -> int:
     # halt at --max-orders-per-fire even if many markets clear all gates.
     live_orders_submitted = 0
 
+    # Pre-fire BALANCE reconciliation: confirm real USDC >= the capital we'll
+    # size against before placing any live order. HALTS (downgrades to paper)
+    # if balance is short or unreadable — fails closed.
+    #
+    # NOTE: true exchange-side POSITION drift detection (compare fill log vs
+    # on-chain holdings) is not yet wired — get_usdc_balance gives us the
+    # balance leg only. We pass the fill-log count as expected; actual is the
+    # same source, so position drift cannot trigger here yet. This is the
+    # balance guard; position drift remains an open checklist item.
+    if live_executor is not None:
+        from tradingagents.exchange.reconciliation import (
+            reconcile, count_open_positions_from_fills,
+        )
+        from tradingagents.exchange.scoring import load_jsonl_rows
+        today_fills = load_jsonl_rows(
+            POLYMARKET_OUTPUT_DIR, date=now.strftime("%Y-%m-%d")
+        )
+        expected_positions = count_open_positions_from_fills(today_fills)
+        recon = reconcile(
+            expected_open_positions=expected_positions,
+            actual_open_positions=expected_positions,  # TODO: fetch exchange-side
+            intended_capital_usd=args.capital,
+            actual_balance_usd=live_executor.get_usdc_balance(),
+        )
+        if not recon.ok:
+            print(
+                f"RECONCILIATION HALT {list(recon.halt_reasons)} — {recon.detail}. "
+                f"Downgrading to paper this fire; reconcile manually before live.",
+                file=sys.stderr,
+            )
+            live_executor = None
+
     if not args.quiet:
         print(f"=== Analysing {len(markets)} markets with model={args.model} ===")
         print(f"  Decisions  -> {log_path}")
