@@ -172,6 +172,26 @@ def main() -> int:
             "orders, not SKIPPED/ERROR. Pass 0 to disable."
         ),
     )
+    parser.add_argument(
+        "--exposure-budget",
+        type=float,
+        default=float(os.environ.get("TRADINGAGENTS_POLYMARKET_EXPOSURE_BUDGET_USD", "0") or "0"),
+        help=(
+            "Hard notional-exposure ceiling (USD). When the cost basis of "
+            "already-open positions reaches this, the fire HALTs to paper. "
+            "Default 0 (disabled). Env: TRADINGAGENTS_POLYMARKET_EXPOSURE_BUDGET_USD."
+        ),
+    )
+    parser.add_argument(
+        "--min-edge",
+        type=float,
+        default=float(os.environ.get("TRADINGAGENTS_POLYMARKET_MIN_EDGE", "0") or "0"),
+        help=(
+            "Cost-aware edge floor: require confidence - buy_price > this to place "
+            "a per-market order. Default 0.0 (disabled). "
+            "Env: TRADINGAGENTS_POLYMARKET_MIN_EDGE."
+        ),
+    )
     args = parser.parse_args()
 
     # Hard kill-switch. Setting this env var to anything truthy immediately
