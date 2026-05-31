@@ -10,6 +10,20 @@ from tradingagents.exchange.polymarket_executor import (
 )
 
 
+def _make_executor(monkeypatch, funder="0xPROXYWALLET"):
+    """Construct a PolymarketExecutor with ClobClient mocked out, so the
+    exchange-side position read can be tested without real creds/network."""
+    monkeypatch.setenv("POLYMARKET_PRIVATE_KEY", "0x" + "1" * 64)
+    monkeypatch.setenv("POLYMARKET_KEY", "k")
+    monkeypatch.setenv("POLYMARKET_SECRET", "s")
+    monkeypatch.setenv("POLYMARKET_PASSPHRASE", "p")
+    monkeypatch.setenv("POLYMARKET_FUNDER", funder)
+    monkeypatch.setenv("POLYMARKET_SIGNATURE_TYPE", "1")
+    with patch("tradingagents.exchange.polymarket_executor.ClobClient") as mock_clob:
+        mock_clob.return_value = MagicMock()
+        return PolymarketExecutor()
+
+
 def _decision(direction, confidence, yes_price=0.30):
     return PolymarketDecision(
         market_id="test-market",
@@ -207,3 +221,63 @@ class TestSignatureType:
             mock_clob.return_value = MagicMock()
             with pytest.raises(PolymarketExecutionDisabled, match="proxy"):
                 PolymarketExecutor()
+
+
+# ---------------------------------------------------------------------------
+# Exchange-side position read (reconciliation leg) — must FAIL CLOSED (None)
+# on every error so the reconciler halts rather than reading a clean book.
+# ---------------------------------------------------------------------------
+
+class TestGetOpenPositionCount:
+    def _patch_requests(self, monkeypatch, *, status=200, json_data=None, raise_exc=None):
+        resp = MagicMock()
+        resp.status_code = status
+        if raise_exc is not None:
+            resp.json.side_effect = raise_exc
+        else:
+            resp.json.return_value = json_data
+        fake_requests = MagicMock()
+        if raise_exc is not None and status == "network":
+            fake_requests.get.side_effect = raise_exc
+        else:
+            fake_requests.get.return_value = resp
+        monkeypatch.setitem(__import__("sys").modules, "requests", fake_requests)
+
+    def test_counts_nonzero_positions(self, monkeypatch):
+        ex = _make_executor(monkeypatch)
+        self._patch_requests(monkeypatch, json_data=[
+            {"asset": "a", "size": "3.0"},
+            {"asset": "b", "size": "0"},       # dust/closed — not counted
+            {"asset": "c", "size": 1.5},
+        ])
+        assert ex.get_open_position_count() == 2
+
+    def test_empty_list_is_zero(self, monkeypatch):
+        ex = _make_executor(monkeypatch)
+        self._patch_requests(monkeypatch, json_data=[])
+        assert ex.get_open_position_count() == 0
+
+    def test_non_200_is_none(self, monkeypatch):
+        ex = _make_executor(monkeypatch)
+        self._patch_requests(monkeypatch, status=503, json_data=[])
+        assert ex.get_open_position_count() is None
+
+    def test_non_list_payload_is_none(self, monkeypatch):
+        ex = _make_executor(monkeypatch)
+        self._patch_requests(monkeypatch, json_data={"error": "nope"})
+        assert ex.get_open_position_count() is None
+
+    def test_malformed_entry_is_none(self, monkeypatch):
+        ex = _make_executor(monkeypatch)
+        self._patch_requests(monkeypatch, json_data=["not-a-dict"])
+        assert ex.get_open_position_count() is None
+
+    def test_unparseable_size_is_none(self, monkeypatch):
+        ex = _make_executor(monkeypatch)
+        self._patch_requests(monkeypatch, json_data=[{"asset": "a", "size": "abc"}])
+        assert ex.get_open_position_count() is None
+
+    def test_network_exception_is_none(self, monkeypatch):
+        ex = _make_executor(monkeypatch)
+        self._patch_requests(monkeypatch, status="network", raise_exc=RuntimeError("boom"))
+        assert ex.get_open_position_count() is None

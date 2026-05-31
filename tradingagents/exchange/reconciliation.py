@@ -121,3 +121,39 @@ def count_open_positions_from_fills(fill_rows: list[dict]) -> int:
         if status in ("CLOSED", "RESOLVED_WIN", "RESOLVED_LOSS", "CANCELED"):
             open_by_market[mid] = 0
     return sum(1 for v in open_by_market.values() if v > 0)
+
+
+def open_exposure_from_fills(fill_rows: list[dict]) -> float:
+    """Sum the cost basis (filled_usd) of positions the bot believes are open.
+
+    Mirrors count_open_positions_from_fills' open-detection, but accumulates the
+    dollar cost basis instead of a count, and zeroes a market's exposure on a
+    close/resolution record. Feeds the NOTIONAL_EXPOSURE ceiling in gate.py:
+    this is the real exposure cap for a slow-settling instrument whose positions
+    don't resolve for days/weeks (so the realized-loss breaker can't bound it).
+
+    A missing/unparseable filled_usd contributes 0. Callers pair this with
+    reconcile() (which HALTs on unreadable exchange state), so a corrupt fill log
+    can't silently uncap exposure.
+    """
+    exposure_by_market: dict[str, float] = {}
+    for r in fill_rows:
+        mid = r.get("market_id")
+        if not mid:
+            continue
+        status = r.get("status")
+        outcome = r.get("outcome")
+        is_open = (
+            outcome == "FILLED"
+            or (status not in ("SKIPPED", "ERROR", "UNFILLED", "UNCONFIRMED")
+                and r.get("filled") is True)
+        )
+        if is_open:
+            try:
+                amt = float(r.get("filled_usd") or 0.0)
+            except (TypeError, ValueError):
+                amt = 0.0
+            exposure_by_market[mid] = exposure_by_market.get(mid, 0.0) + amt
+        if status in ("CLOSED", "RESOLVED_WIN", "RESOLVED_LOSS", "CANCELED"):
+            exposure_by_market[mid] = 0.0
+    return round(sum(v for v in exposure_by_market.values() if v > 0), 6)

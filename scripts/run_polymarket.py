@@ -43,6 +43,7 @@ from tradingagents.exchange.polymarket_executor import (
     PolymarketExecutionDisabled,
     PolymarketExecutor,
 )
+from tradingagents.exchange.gate import evaluate_fire, evaluate_market, kill_switch_active
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 logger = logging.getLogger(__name__)
@@ -176,11 +177,11 @@ def main() -> int:
     # Hard kill-switch. Setting this env var to anything truthy immediately
     # short-circuits live mode regardless of CLI flags. Provides an
     # out-of-band way to halt autotrade without editing the routine UI.
-    kill_switch = os.environ.get("TRADINGAGENTS_AUTOTRADE_KILL_SWITCH", "").strip()
-    if args.live and kill_switch and kill_switch.lower() not in ("0", "false", "no", ""):
+    kill_on = kill_switch_active()
+    if args.live and kill_on:
         print(
-            f"AUTOTRADE KILL SWITCH ACTIVE (TRADINGAGENTS_AUTOTRADE_KILL_SWITCH={kill_switch!r}) "
-            f"— --live disabled, falling back to paper mode.",
+            "AUTOTRADE KILL SWITCH ACTIVE (TRADINGAGENTS_AUTOTRADE_KILL_SWITCH) "
+            "— --live disabled, falling back to paper mode.",
             file=sys.stderr,
         )
         args.live = False
@@ -207,6 +208,15 @@ def main() -> int:
             f"--daily-budget-usd must be a finite non-negative number, "
             f"got {args.daily_budget_usd}"
         )
+    if not math.isfinite(args.exposure_budget) or args.exposure_budget < 0:
+        parser.error(
+            f"--exposure-budget must be a finite non-negative number, "
+            f"got {args.exposure_budget}"
+        )
+    if not math.isfinite(args.min_edge) or not (0.0 <= args.min_edge <= 1.0):
+        parser.error(
+            f"--min-edge must be a finite number in [0.0, 1.0], got {args.min_edge}"
+        )
 
     if not os.environ.get("EXA_API_KEY"):
         print("ERROR: EXA_API_KEY not set in environment or .env", file=sys.stderr)
@@ -232,20 +242,6 @@ def main() -> int:
     from tradingagents.exchange.notifier import Notifier
     notifier = Notifier()
     loss_breaker = LossBreaker(POLYMARKET_OUTPUT_DIR / "loss_breaker.json")
-    if args.live and loss_breaker.is_tripped():
-        st = loss_breaker.status()
-        print(
-            f"LOSS BREAKER TRIPPED {st['reasons']} — "
-            f"daily_pnl=${st['daily_realized_pnl']} (limit -${st['daily_loss_limit']}), "
-            f"drawdown=${st['drawdown']} (limit ${st['drawdown_limit']}). "
-            f"Downgrading to paper mode this fire. Clear with LossBreaker.reset() after review.",
-            file=sys.stderr,
-        )
-        notifier.breaker_tripped(st["reasons"], {
-            "daily_realized_pnl": st["daily_realized_pnl"],
-            "drawdown": st["drawdown"],
-        })
-        live_executor = None
 
     market_kwargs: dict = {"limit": args.limit}
     if args.days_until_close is not None:
@@ -337,37 +333,60 @@ def main() -> int:
     # halt at --max-orders-per-fire even if many markets clear all gates.
     live_orders_submitted = 0
 
-    # Pre-fire BALANCE reconciliation: confirm real USDC >= the capital we'll
-    # size against before placing any live order. HALTS (downgrades to paper)
-    # if balance is short or unreadable — fails closed.
+    # Pre-fire safety gate: loss breaker + balance/position reconciliation,
+    # evaluated ONCE here and folded into a single live->paper downgrade via
+    # gate.evaluate_fire. Fails closed — any tripped guard disables live for the
+    # whole fire, and nothing downstream can re-enable it.
     #
-    # NOTE: true exchange-side POSITION drift detection (compare fill log vs
-    # on-chain holdings) is not yet wired — get_usdc_balance gives us the
-    # balance leg only. We pass the fill-log count as expected; actual is the
-    # same source, so position drift cannot trigger here yet. This is the
-    # balance guard; position drift remains an open checklist item.
+    # Position reconciliation compares the bot's ALL-TIME open-position count
+    # (count_open_positions_from_fills over the full fill history) against the
+    # exchange-side count the funder wallet actually holds (Polymarket Data API
+    # via get_open_position_count). Both legs are dimensionally the same
+    # (all-time open), so genuine drift — a recorded fill that never settled, or
+    # an exchange position the bot never logged — trips RECONCILE.
     if live_executor is not None:
         from tradingagents.exchange.reconciliation import (
-            reconcile, count_open_positions_from_fills,
+            reconcile, count_open_positions_from_fills, open_exposure_from_fills,
         )
         from tradingagents.exchange.scoring import load_jsonl_rows
-        today_fills = load_jsonl_rows(
-            POLYMARKET_OUTPUT_DIR, date=now.strftime("%Y-%m-%d")
-        )
-        expected_positions = count_open_positions_from_fills(today_fills)
+        all_fills = load_jsonl_rows(POLYMARKET_OUTPUT_DIR)  # no date => all days
+        expected_positions = count_open_positions_from_fills(all_fills)
+        open_exposure = open_exposure_from_fills(all_fills)
         recon = reconcile(
             expected_open_positions=expected_positions,
-            actual_open_positions=expected_positions,  # TODO: fetch exchange-side
+            actual_open_positions=live_executor.get_open_position_count(),
             intended_capital_usd=args.capital,
             actual_balance_usd=live_executor.get_usdc_balance(),
         )
-        if not recon.ok:
+        breaker_tripped = loss_breaker.is_tripped()
+        verdict = evaluate_fire(
+            kill_switch_on=kill_on,
+            breaker_tripped=breaker_tripped,
+            reconcile_ok=recon.ok,
+            open_exposure_usd=open_exposure,
+            exposure_budget_usd=args.exposure_budget,
+        )
+        if not verdict.live_allowed:
             print(
-                f"RECONCILIATION HALT {list(recon.halt_reasons)} — {recon.detail}. "
-                f"Downgrading to paper this fire; reconcile manually before live.",
+                f"FIRE_HALT {list(verdict.reason_codes)} — downgrading to paper "
+                f"this fire. open_exposure=${open_exposure:.2f} "
+                f"budget=${args.exposure_budget:.2f} recon={recon.detail}",
                 file=sys.stderr,
             )
-            notifier.reconciliation_halt(list(recon.halt_reasons), recon.detail)
+            if breaker_tripped:
+                st = loss_breaker.status()
+                notifier.breaker_tripped(st["reasons"], {
+                    "daily_realized_pnl": st["daily_realized_pnl"],
+                    "drawdown": st["drawdown"],
+                })
+            if not recon.ok:
+                notifier.reconciliation_halt(list(recon.halt_reasons), recon.detail)
+            if "NOTIONAL_EXPOSURE" in verdict.reason_codes:
+                notifier.send(
+                    f"NOTIONAL_EXPOSURE halt: open ${open_exposure:.2f} >= "
+                    f"budget ${args.exposure_budget:.2f}; fire downgraded to paper.",
+                    severity="warn",
+                )
             live_executor = None
 
     if not args.quiet:
@@ -489,20 +508,39 @@ def main() -> int:
                 print()
             continue
 
-        # Gate 3: confidence. Calibration showed conf<0.85 wins ~33%
-        # vs 100% at conf>=0.9 (n=17). Suppresses low-conviction fills.
-        if decision.confidence < args.min_confidence:
-            _skip_fill("below_min_confidence", {
+        # Gate 3: per-market gate — confidence floor + (opt-in) cost-aware edge.
+        # Confidence calibration: conf<0.85 wins ~33% vs 100% at conf>=0.9 (n=17).
+        # min_edge defaults to 0 (edge gate off), so default behavior is unchanged.
+        buy_price = (
+            decision.yes_price_at_analysis
+            if decision.direction.value == "BUY_YES"
+            else 1.0 - decision.yes_price_at_analysis
+        )
+        mverdict = evaluate_market(
+            direction=decision.direction.value,
+            confidence=decision.confidence,
+            min_confidence=args.min_confidence,
+            buy_price=buy_price,
+            min_edge=args.min_edge,
+        )
+        if not mverdict.allow:
+            _reason = {
+                "CONFIDENCE_FLOOR": "below_min_confidence",
+                "EDGE_NET_OF_COST": "edge_below_cost",
+            }.get(mverdict.reason_code, mverdict.reason_code.lower())
+            _skip_fill(_reason, {
                 "direction": decision.direction.value,
                 "confidence": decision.confidence,
                 "yes_price_at_analysis": decision.yes_price_at_analysis,
                 "min_confidence": args.min_confidence,
+                "min_edge": args.min_edge,
                 "cluster_id": cluster_id,
+                **mverdict.detail,
             })
             if not args.quiet:
                 print(
-                    f"    fill: SKIP — confidence {decision.confidence:.2f} "
-                    f"< --min-confidence {args.min_confidence:.2f}\n"
+                    f"    fill: SKIP — {mverdict.reason_code} ({_reason}); "
+                    f"conf {decision.confidence:.2f} buy_price {buy_price:.3f}\n"
                 )
             continue
 

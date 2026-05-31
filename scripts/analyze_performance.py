@@ -43,6 +43,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
 from tradingagents.dataflows.polymarket_data import get_market_by_id
+from tradingagents.exchange.execution_metrics import compute_execution_metrics
 from tradingagents.exchange.scoring import (
     MarketOutcome,
     fetch_outcomes,
@@ -134,6 +135,24 @@ def analyze(state_dir: Path, notional: float, out: TextIO | None) -> int:
             _print(out, f"| **Realized ROI** | **{realized/invested*100:+.1f}%** |")
     else:
         _print(out, "No actual fills found.")
+
+    # ---- Execution quality (fill rate + slippage) ----
+    # Measures whether EXECUTION is sane (the live pilot's real question),
+    # distinct from whether the strategy has edge. Computed over ALL fill rows.
+    em = compute_execution_metrics(load_jsonl_rows(state_dir / "polymarket"))
+
+    def _pct(x: float | None) -> str:
+        return f"{x:.1%}" if isinstance(x, float) else "n/a"
+
+    _print(out, "\n## 1b. Execution quality (fill rate + slippage)\n")
+    _print(out, "| metric | value |")
+    _print(out, "|---|---|")
+    _print(out, f"| Paper attempts | {em['paper_attempts']} |")
+    _print(out, f"| Paper fill rate | {_pct(em['paper_fill_rate'])} |")
+    _print(out, f"| Live attempts | {em['live_attempts']} |")
+    _print(out, f"| Live fill rate | {_pct(em['live_fill_rate'])} |")
+    _print(out, f"| Median slippage (pp) | {em['median_slippage_pp'] if em['median_slippage_pp'] is not None else 'n/a'} |")
+    _print(out, "| Live realized-vs-quoted bps | n/a (Phase 3: needs matched-price capture) |")
 
     # ---- Population 2: all directional decisions, simulated ----
     decisions = _load_directional_decisions(state_dir)

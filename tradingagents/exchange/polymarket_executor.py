@@ -25,6 +25,12 @@ _MAX_FRACTION = 0.20        # higher cap than stocks — max loss is capped at $
 _MIN_PRICE = 0.02           # skip markets priced below 2c (illiquid)
 _MAX_PRICE = 0.97           # skip markets priced above 97c (near-zero upside after fees)
 
+# Polymarket Data API — exchange-side position read for reconciliation. The CLOB
+# client exposes balances but not a clean open-positions view; the data-api
+# /positions endpoint reports the funder wallet's current ERC1155 holdings.
+_DATA_API_HOST = "https://data-api.polymarket.com"
+_POSITION_DUST = 1e-6       # ignore dust balances below this when counting positions
+
 try:
     from py_clob_client.client import ClobClient
     from py_clob_client.clob_types import ApiCreds, MarketOrderArgs, OrderType
@@ -291,6 +297,51 @@ class PolymarketExecutor:
             return float(raw) / 1_000_000.0
         except Exception as exc:  # noqa: BLE001
             logger.warning("get_usdc_balance failed: %s", exc)
+            return None
+
+    def get_open_position_count(self) -> int | None:
+        """Exchange-side count of open positions held by the funder wallet.
+
+        Queries the Polymarket Data API /positions endpoint for the funder
+        (proxy) address and counts holdings with a non-dust size. This is the
+        exchange leg of position reconciliation; the bot-side leg is
+        reconciliation.count_open_positions_from_fills over the full fill log.
+
+        Returns None on ANY error — network failure, non-200, unexpected
+        payload shape, or an unparseable size. The reconciler treats None as
+        'unavailable' and HALTS, so a failed fetch can never be misread as a
+        clean zero-position book that lets the bot trade against phantom state.
+        """
+        try:
+            import requests
+            resp = requests.get(
+                f"{_DATA_API_HOST}/positions",
+                params={"user": self._funder, "sizeThreshold": 0.0},
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    "get_open_position_count: HTTP %s from data-api", resp.status_code
+                )
+                return None
+            data = resp.json()
+            if not isinstance(data, list):
+                logger.warning(
+                    "get_open_position_count: expected a list, got %s", type(data).__name__
+                )
+                return None
+            count = 0
+            for pos in data:
+                if not isinstance(pos, dict):
+                    return None  # malformed entry — fail closed
+                try:
+                    if abs(float(pos.get("size"))) > _POSITION_DUST:
+                        count += 1
+                except (TypeError, ValueError):
+                    return None  # unparseable size — fail closed
+            return count
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("get_open_position_count failed: %s", exc)
             return None
 
     def place_order(

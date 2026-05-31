@@ -109,6 +109,7 @@ def main() -> int:
     from tradingagents.graph.trading_graph import TradingAgentsGraph
     from tradingagents.agents.schemas import StockDirection
     from tradingagents.exchange.alpaca_executor import AlpacaExecutor, AlpacaExecutionDisabled
+    from tradingagents.exchange.gate import evaluate_fire, kill_switch_active
 
     config = {
         **DEFAULT_CONFIG,
@@ -129,10 +130,11 @@ def main() -> int:
 
     # Kill switch — same out-of-band stop as the polymarket routine. Any truthy
     # value forces --no-fill regardless of Alpaca config.
-    kill_switch = os.environ.get("TRADINGAGENTS_AUTOTRADE_KILL_SWITCH", "").strip()
-    if executor is not None and kill_switch and kill_switch.lower() not in ("0", "false", "no", ""):
+    kill_on = kill_switch_active()
+    if executor is not None and kill_on:
         print(
-            f"AUTOTRADE KILL SWITCH ACTIVE ({kill_switch!r}) — skipping order submission.",
+            "AUTOTRADE KILL SWITCH ACTIVE (TRADINGAGENTS_AUTOTRADE_KILL_SWITCH) "
+            "— skipping order submission.",
             file=sys.stderr,
         )
         executor = None
@@ -153,26 +155,11 @@ def main() -> int:
     # Per-instrument loss breaker state (independent of polymarket's).
     loss_breaker = LossBreaker(STOCKS_OUTPUT_DIR / "loss_breaker.json")
 
-    # Pre-fire safety gates (only when about to place real/paper orders).
+    # Pre-fire safety gate: loss breaker + reconciliation, evaluated ONCE and
+    # folded into a single downgrade via gate.evaluate_fire. Fails closed.
+    # Alpaca gives REAL equity + position count, so reconciliation here is a
+    # genuine balance AND position-drift check (stronger than polymarket's).
     if executor is not None:
-        # 1) Loss breaker — daily realized loss / drawdown. Fails closed.
-        if loss_breaker.is_tripped():
-            st = loss_breaker.status()
-            print(
-                f"LOSS BREAKER TRIPPED {st['reasons']} — "
-                f"daily_pnl=${st['daily_realized_pnl']} drawdown=${st['drawdown']}. "
-                f"Skipping order submission this fire.",
-                file=sys.stderr,
-            )
-            notifier.breaker_tripped(st["reasons"], {
-                "daily_realized_pnl": st["daily_realized_pnl"],
-                "drawdown": st["drawdown"],
-            })
-            executor = None
-
-    if executor is not None:
-        # 2) Reconciliation — Alpaca gives REAL equity + position count, so this
-        # is a genuine balance AND position-drift check (better than polymarket).
         prior_orders = []
         op = order_log_path
         if op.exists():
@@ -187,7 +174,7 @@ def main() -> int:
         )
         equity = executor.get_account_equity()
         # Seed the breaker's equity tracker so drawdown is measured from real
-        # account equity going forward.
+        # account equity going forward (before is_tripped reads it below).
         if equity is not None:
             loss_breaker.set_equity(equity)
         recon = reconcile(
@@ -196,13 +183,26 @@ def main() -> int:
             intended_capital_usd=args.capital,
             actual_balance_usd=equity,
         )
-        if not recon.ok:
+        breaker_tripped = loss_breaker.is_tripped()
+        verdict = evaluate_fire(
+            kill_switch_on=kill_on,
+            breaker_tripped=breaker_tripped,
+            reconcile_ok=recon.ok,
+        )
+        if not verdict.live_allowed:
             print(
-                f"RECONCILIATION HALT {list(recon.halt_reasons)} — {recon.detail}. "
-                f"Skipping order submission; reconcile manually.",
+                f"FIRE_HALT {list(verdict.reason_codes)} — skipping order "
+                f"submission this fire. recon={recon.detail}",
                 file=sys.stderr,
             )
-            notifier.reconciliation_halt(list(recon.halt_reasons), recon.detail)
+            if breaker_tripped:
+                st = loss_breaker.status()
+                notifier.breaker_tripped(st["reasons"], {
+                    "daily_realized_pnl": st["daily_realized_pnl"],
+                    "drawdown": st["drawdown"],
+                })
+            if not recon.ok:
+                notifier.reconciliation_halt(list(recon.halt_reasons), recon.detail)
             executor = None
 
     tickers = [t.upper() for t in args.tickers]
